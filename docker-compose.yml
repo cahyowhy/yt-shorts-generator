@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  shortgen:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./models:/app/models
+    environment:
+      - SHORTGEN_DATA_DIR=/app/data
+      - SHORTGEN_OUTPUT_DIR=/app/output
+      - SHORTGEN_MODELS_DIR=/app/models
+      - SHORTGEN_OLLAMA_BASE_URL=http://ollama:11434
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  ollama_data:
