@@ -17,9 +17,11 @@ class FaceTracker:
         self,
         sample_rate: int = 5,  # Sample every N frames
         min_detection_confidence: float = 0.5,
+        model_path: str = "models/blazer_face_short_range.tflite", # ADDED: Tasks API requires a model file
     ):
         self.sample_rate = sample_rate
         self.min_detection_confidence = min_detection_confidence
+        self.model_path = model_path
 
     async def track(self, video_path: str) -> list[FacePosition]:
         """
@@ -51,80 +53,106 @@ class FaceTracker:
         try:
             import cv2
             import mediapipe as mp
+            from mediapipe.tasks import python
+            from mediapipe.tasks.python import vision
 
-            mp_face_detection = mp.solutions.face_detection
+            # Check if model exists
+            if not Path(self.model_path).exists():
+                raise FileNotFoundError(
+                    f"MediaPipe model missing at {self.model_path}. "
+                    "Please download blazer_face_short_range.tflite."
+                )
+
+            # Initialize MediaPipe Tasks Face Detector
+            base_options = python.BaseOptions(model_asset_path=self.model_path)
+            options = vision.FaceDetectorOptions(
+                base_options=base_options,
+                min_detection_confidence=self.min_detection_confidence
+            )
+            detector = vision.FaceDetector.create_from_options(options)
 
             cap = cv2.VideoCapture(video_path)
             fps = cap.get(cv2.CAP_PROP_FPS)
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            # Get frame dimensions to calculate relative positions
+            frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
             face_positions: list[FacePosition] = []
+            frame_number = 0
 
-            with mp_face_detection.FaceDetection(
-                model_selection=1,  # Full range model
-                min_detection_confidence=self.min_detection_confidence,
-            ) as face_detection:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-                frame_number = 0
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
+                # Sample every N frames
+                if frame_number % self.sample_rate == 0:
+                    # Convert BGR to RGB
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    
+                    # Convert to MediaPipe Image format
+                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+                    
+                    # Process frame
+                    results = detector.detect(mp_image)
+                    timestamp = frame_number / fps
 
-                    # Sample every N frames
-                    if frame_number % self.sample_rate == 0:
-                        # Convert BGR to RGB
-                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        results = face_detection.process(rgb_frame)
+                    if results.detections:
+                        # Use the first (most confident) detection
+                        detection = results.detections[0]
+                        bbox = detection.bounding_box
 
-                        timestamp = frame_number / fps
+                        # Tasks API returns absolute pixels. Convert to relative (0.0 to 1.0)
+                        rel_width = bbox.width / frame_width
+                        rel_height = bbox.height / frame_height
+                        rel_center_x = (bbox.origin_x / frame_width) + (rel_width / 2)
+                        rel_center_y = (bbox.origin_y / frame_height) + (rel_height / 2)
 
-                        if results.detections:
-                            # Use the first (most confident) detection
-                            detection = results.detections[0]
-                            bbox = detection.location_data.relative_bounding_box
+                        # Tasks API stores the score inside categories
+                        confidence = detection.categories[0].score
 
-                            face_positions.append(
-                                FacePosition(
-                                    frame_number=frame_number,
-                                    timestamp=timestamp,
-                                    center_x=bbox.xmin + bbox.width / 2,
-                                    center_y=bbox.ymin + bbox.height / 2,
-                                    width=bbox.width,
-                                    height=bbox.height,
-                                    confidence=detection.score[0],
-                                )
+                        face_positions.append(
+                            FacePosition(
+                                frame_number=frame_number,
+                                timestamp=timestamp,
+                                center_x=rel_center_x,
+                                center_y=rel_center_y,
+                                width=rel_width,
+                                height=rel_height,
+                                confidence=confidence,
                             )
-                        else:
-                            # No face detected - use center as fallback
-                            face_positions.append(
-                                FacePosition(
-                                    frame_number=frame_number,
-                                    timestamp=timestamp,
-                                    center_x=0.5,
-                                    center_y=0.5,
-                                    width=0.0,
-                                    height=0.0,
-                                    confidence=0.0,
-                                )
+                        )
+                    else:
+                        # No face detected - use center as fallback
+                        face_positions.append(
+                            FacePosition(
+                                frame_number=frame_number,
+                                timestamp=timestamp,
+                                center_x=0.5,
+                                center_y=0.5,
+                                width=0.0,
+                                height=0.0,
+                                confidence=0.0,
                             )
+                        )
 
-                    frame_number += 1
+                frame_number += 1
 
-                    # Progress logging
-                    if frame_number % (fps * 30) == 0:  # Log every 30 seconds
-                        progress = frame_number / total_frames * 100
-                        logger.debug(f"Face tracking progress: {progress:.1f}%")
+                # Progress logging
+                if frame_number % (fps * 30) == 0:  # Log every 30 seconds
+                    progress = frame_number / total_frames * 100
+                    logger.debug(f"Face tracking progress: {progress:.1f}%")
 
             cap.release()
+            detector.close() # Clean up the detector
             logger.info(f"Tracked faces in {len(face_positions)} frames")
             return face_positions
 
-        except ImportError as e:
-            logger.warning(f"MediaPipe not available: {e}")
-            return self._fallback_tracking(video_path)
         except Exception as e:
-            raise AnalysisError(f"Face tracking failed: {e}") from e
+            logger.warning(f"MediaPipe Tasks failed: {e}. Falling back to OpenCV.")
+            return self._fallback_tracking(video_path)
 
     def _fallback_tracking(self, video_path: str) -> list[FacePosition]:
         """Fallback face detection using OpenCV Haar cascades."""

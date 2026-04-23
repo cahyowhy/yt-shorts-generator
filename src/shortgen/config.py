@@ -43,10 +43,12 @@ class Settings(BaseSettings):
     output_bitrate: str = Field(default="8M")
 
     # Caption settings
-    caption_font_size: int = Field(default=48)
+    caption_font_size: int = Field(default=96)  # Increased for 1080x1920 canvas
     caption_font_color: str = Field(default="white")
     caption_bg_color: str = Field(default="black@0.7")
     caption_position: str = Field(default="bottom")
+    caption_outline_width: int = Field(default=5)  # Added thick outline for readability
+    caption_shadow_width: int = Field(default=2)   # Added slight shadow for depth
 
     # API settings
     api_host: str = Field(default="0.0.0.0")

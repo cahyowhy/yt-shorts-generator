@@ -24,8 +24,8 @@ class Captioner:
 
     def __init__(
         self,
-        max_words_per_caption: int = 5,
-        max_chars_per_caption: int = 40,
+        max_words_per_caption: int = 2,  # Changed from 5 to 2 for vertical video
+        max_chars_per_caption: int = 20, # Reduced to prevent aggressive wrapping
         min_duration: float = 0.5,
         max_duration: float = 3.0,
     ):
@@ -133,20 +133,29 @@ class Captioner:
 
     def to_ass(self, captions: list[Caption]) -> str:
         """Convert captions to ASS format (better styling support)."""
-        # ASS header
+        
+        # Pulling the new styling variables from settings
         header = """[Script Info]
 Title: Generated Captions
 ScriptType: v4.00+
 Collisions: Normal
 PlayDepth: 0
+PlayResX: {width}
+PlayResY: {height}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,2,1,2,10,10,30,1
+Style: Default,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,{outline},{shadow},2,10,10,250,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-""".format(font_size=settings.caption_font_size)
+""".format(
+            font_size=settings.caption_font_size,
+            width=settings.output_resolution_width,
+            height=settings.output_resolution_height,
+            outline=settings.caption_outline_width,
+            shadow=settings.caption_shadow_width
+        )
 
         lines = [header]
 
