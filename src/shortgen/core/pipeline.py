@@ -138,7 +138,10 @@ class ShortGeneratorPipeline:
 
         # These can run concurrently
         transcript_task = asyncio.create_task(
-            self.transcriber.transcribe(video_path)
+            self.transcriber.transcribe(
+                video_path,
+                subtitle_path=getattr(metadata, 'subtitle_path', None),
+            )
         )
         audio_task = asyncio.create_task(
             self.audio_analyzer.analyze(video_path)

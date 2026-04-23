@@ -41,6 +41,7 @@ class VideoMetadata(BaseModel):
     height: int
     fps: float
     file_path: str
+    subtitle_path: Optional[str] = None  # Add this field
 
     @computed_field
     @property

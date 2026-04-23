@@ -45,7 +45,7 @@ class HighlightFinder:
             logger.warning("Empty transcript, skipping highlight detection")
             return []
 
-        logger.info("Finding highlights with LLM")
+        logger.info(f"Finding highlights with LLM :{ self.model}")
 
         try:
             # Check if Ollama is available
@@ -58,6 +58,7 @@ class HighlightFinder:
             highlights = self._parse_response(response, video_duration)
 
             logger.info(f"Found {len(highlights)} highlights")
+            logger.info(f"Highlight: {json.dumps(highlights)}")
             return highlights
 
         except Exception as e:
