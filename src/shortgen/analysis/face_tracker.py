@@ -3,8 +3,9 @@
 import asyncio
 from pathlib import Path
 from typing import Optional
-
+from tqdm import tqdm
 from loguru import logger
+import math
 
 from shortgen.core.exceptions import AnalysisError
 from shortgen.core.models import FacePosition
@@ -17,27 +18,23 @@ class FaceTracker:
         self,
         sample_rate: int = 5,  # Sample every N frames
         min_detection_confidence: float = 0.5,
-        model_path: str = "models/blazer_face_short_range.tflite", # ADDED: Tasks API requires a model file
+        model_path: str = "models/face_landmarker.task", 
     ):
         self.sample_rate = sample_rate
         self.min_detection_confidence = min_detection_confidence
         self.model_path = model_path
+        
+        self.history_length = 10 
 
     async def track(self, video_path: str) -> list[FacePosition]:
         """
-        Track face positions throughout video.
-
-        Args:
-            video_path: Path to video file
-
-        Returns:
-            List of FacePosition objects
+        Track face positions throughout video and focus on the active speaker.
         """
         path = Path(video_path)
         if not path.exists():
             raise AnalysisError(f"Video file not found: {video_path}")
 
-        logger.info(f"Tracking faces: {path.name}")
+        logger.info(f"Tracking faces and identifying speaker: {path.name}")
 
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
@@ -48,110 +45,158 @@ class FaceTracker:
 
         return result
 
+    def _calculate_mar(self, landmarks, width: int, height: int) -> float:
+        """Calculate Mouth Aspect Ratio (MAR) to detect speaking."""
+        # MediaPipe inner lip indices: Top(13), Bottom(14), Left Corner(78), Right Corner(308)
+        top = landmarks[13]
+        bottom = landmarks[14]
+        left = landmarks[78]
+        right = landmarks[308]
+
+        # Convert normalized coordinates to absolute pixels for accurate distance
+        v_dist = math.hypot((top.x - bottom.x) * width, (top.y - bottom.y) * height)
+        h_dist = math.hypot((left.x - right.x) * width, (left.y - right.y) * height)
+
+        if h_dist == 0:
+            return 0.0
+        return v_dist / h_dist
+
     def _track_sync(self, video_path: str) -> list[FacePosition]:
-        """Synchronous face tracking implementation."""
+        """Synchronous face tracking with speaker detection."""
         try:
             import cv2
             import mediapipe as mp
             from mediapipe.tasks import python
             from mediapipe.tasks.python import vision
+            from tqdm import tqdm  # <--- Added import
 
-            # Check if model exists
             if not Path(self.model_path).exists():
                 raise FileNotFoundError(
                     f"MediaPipe model missing at {self.model_path}. "
-                    "Please download blazer_face_short_range.tflite."
+                    "Please download 'face_landmarker.task' from Google MediaPipe."
                 )
 
-            # Initialize MediaPipe Tasks Face Detector
+            # Initialize Landmarker
             base_options = python.BaseOptions(model_asset_path=self.model_path)
-            options = vision.FaceDetectorOptions(
+            options = vision.FaceLandmarkerOptions(
                 base_options=base_options,
-                min_detection_confidence=self.min_detection_confidence
+                num_faces=3,
+                min_face_detection_confidence=self.min_detection_confidence,
+                output_face_blendshapes=False,
+                output_facial_transformation_matrixes=False
             )
-            detector = vision.FaceDetector.create_from_options(options)
+            landmarker = vision.FaceLandmarker.create_from_options(options)
 
             cap = cv2.VideoCapture(video_path)
             fps = cap.get(cv2.CAP_PROP_FPS)
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             
-            # Get frame dimensions to calculate relative positions
             frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
             face_positions: list[FacePosition] = []
             frame_number = 0
+            
+            tracked_faces = {} 
+            next_face_id = 0
 
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            # Initialize the Progress Bar
+            with tqdm(total=total_frames, desc="Tracking Faces", unit="fr") as pbar:
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
 
-                # Sample every N frames
-                if frame_number % self.sample_rate == 0:
-                    # Convert BGR to RGB
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    
-                    # Convert to MediaPipe Image format
-                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-                    
-                    # Process frame
-                    results = detector.detect(mp_image)
-                    timestamp = frame_number / fps
+                    if frame_number % self.sample_rate == 0:
+                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+                        
+                        results = landmarker.detect(mp_image)
+                        timestamp = frame_number / fps
 
-                    if results.detections:
-                        # Use the first (most confident) detection
-                        detection = results.detections[0]
-                        bbox = detection.bounding_box
+                        current_frame_faces = []
 
-                        # Tasks API returns absolute pixels. Convert to relative (0.0 to 1.0)
-                        rel_width = bbox.width / frame_width
-                        rel_height = bbox.height / frame_height
-                        rel_center_x = (bbox.origin_x / frame_width) + (rel_width / 2)
-                        rel_center_y = (bbox.origin_y / frame_height) + (rel_height / 2)
+                        if results.face_landmarks:
+                            # ... [Existing processing logic for landmarks] ...
+                            for i, landmarks in enumerate(results.face_landmarks):
+                                x_coords = [lm.x for lm in landmarks]
+                                y_coords = [lm.y for lm in landmarks]
+                                min_x, max_x = min(x_coords), max(x_coords)
+                                min_y, max_y = min(y_coords), max(y_coords)
+                                width, height = max_x - min_x, max_y - min_y
+                                cx, cy = min_x + (width / 2), min_y + (height / 2)
+                                mar = self._calculate_mar(landmarks, frame_width, frame_height)
+                                
+                                current_frame_faces.append({
+                                    'cx': cx, 'cy': cy, 'width': width, 'height': height,
+                                    'mar': mar, 'confidence': 0.9
+                                })
 
-                        # Tasks API stores the score inside categories
-                        confidence = detection.categories[0].score
+                            for face in current_frame_faces:
+                                best_id = None
+                                min_dist = float('inf')
+                                for fid, data in tracked_faces.items():
+                                    dist = math.hypot(face['cx'] - data['cx'], face['cy'] - data['cy'])
+                                    if dist < 0.15 and dist < min_dist:
+                                        min_dist = dist
+                                        best_id = fid
 
-                        face_positions.append(
-                            FacePosition(
-                                frame_number=frame_number,
-                                timestamp=timestamp,
-                                center_x=rel_center_x,
-                                center_y=rel_center_y,
-                                width=rel_width,
-                                height=rel_height,
-                                confidence=confidence,
+                                if best_id is not None:
+                                    tracked_faces[best_id].update({'cx': face['cx'], 'cy': face['cy']})
+                                    tracked_faces[best_id]['mar_history'].append(face['mar'])
+                                    if len(tracked_faces[best_id]['mar_history']) > self.history_length:
+                                        tracked_faces[best_id]['mar_history'].pop(0)
+                                    face['id'] = best_id
+                                else:
+                                    face['id'] = next_face_id
+                                    tracked_faces[next_face_id] = {
+                                        'cx': face['cx'], 'cy': face['cy'], 'mar_history': [face['mar']]
+                                    }
+                                    next_face_id += 1
+
+                            best_face = None
+                            max_movement = -1.0
+                            for face in current_frame_faces:
+                                history = tracked_faces[face['id']]['mar_history']
+                                movement = max(history) - min(history) if len(history) > 1 else 0.0
+                                if movement > max_movement:
+                                    max_movement = movement
+                                    best_face = face
+
+                            if max_movement < 0.02 and current_frame_faces:
+                                best_face = max(current_frame_faces, key=lambda f: f['width'] * f['height'])
+
+                            if best_face:
+                                face_positions.append(
+                                    FacePosition(
+                                        frame_number=frame_number, timestamp=timestamp,
+                                        center_x=best_face['cx'], center_y=best_face['cy'],
+                                        width=best_face['width'], height=best_face['height'],
+                                        confidence=best_face['confidence'],
+                                    )
+                                )
+                        else:
+                            face_positions.append(
+                                FacePosition(
+                                    frame_number=frame_number, timestamp=timestamp,
+                                    center_x=0.5, center_y=0.5, width=0.0, height=0.0, confidence=0.0,
+                                )
                             )
-                        )
-                    else:
-                        # No face detected - use center as fallback
-                        face_positions.append(
-                            FacePosition(
-                                frame_number=frame_number,
-                                timestamp=timestamp,
-                                center_x=0.5,
-                                center_y=0.5,
-                                width=0.0,
-                                height=0.0,
-                                confidence=0.0,
-                            )
-                        )
 
-                frame_number += 1
+                    frame_number += 1
+                    pbar.update(1) # Update progress bar every frame
 
-                # Progress logging
-                if frame_number % (fps * 30) == 0:  # Log every 30 seconds
-                    progress = frame_number / total_frames * 100
-                    logger.debug(f"Face tracking progress: {progress:.1f}%")
+                    # Log every 10% instead of every 30 seconds
+                    if frame_number % max(1, (total_frames // 10)) == 0:
+                        progress = (frame_number / total_frames) * 100
+                        logger.info(f"Tracking Progress: {progress:.0f}%")
 
             cap.release()
-            detector.close() # Clean up the detector
-            logger.info(f"Tracked faces in {len(face_positions)} frames")
+            landmarker.close()
             return face_positions
 
         except Exception as e:
-            logger.warning(f"MediaPipe Tasks failed: {e}. Falling back to OpenCV.")
+            logger.warning(f"MediaPipe failed: {e}. Falling back.")
             return self._fallback_tracking(video_path)
 
     def _fallback_tracking(self, video_path: str) -> list[FacePosition]:

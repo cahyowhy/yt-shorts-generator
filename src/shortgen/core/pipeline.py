@@ -19,6 +19,7 @@ from shortgen.core.models import (
     ScoringWeights,
     Segment,
     VideoMetadata,
+    TranscriptWord,
 )
 from shortgen.output.renderer import VideoRenderer
 from shortgen.processing.captioner import Captioner
@@ -32,9 +33,8 @@ ProgressCallback = Callable[[str, float], None]
 
 class ShortGeneratorPipeline:
     """
-    Main orchestrator for the video-to-shorts pipeline.
-
-    Coordinates all stages: download → analyze → score → process → render
+    Unified orchestrator for the video-to-shorts pipeline.
+    Supports both LLM-based highlights and Sliding Window analysis.
     """
 
     def __init__(
@@ -45,7 +45,7 @@ class ShortGeneratorPipeline:
         self.weights = (weights or ScoringWeights()).normalize()
         self.progress_callback = progress_callback
 
-        # Initialize components (lazy loading in production)
+        # Initialize components
         self.downloader = VideoDownloader()
         self.transcriber = Transcriber(model_name=settings.whisper_model)
         self.audio_analyzer = AudioAnalyzer()
@@ -70,18 +70,11 @@ class ShortGeneratorPipeline:
         platform: Platform = Platform.YOUTUBE_SHORTS,
         num_shorts: int = 5,
         output_dir: Optional[Path] = None,
+        all_segments: bool = False,
+        use_sliding_window: bool = False,
     ) -> list[Path]:
         """
         Main processing pipeline.
-
-        Args:
-            url: YouTube video URL
-            platform: Target platform for output format
-            num_shorts: Number of shorts to generate
-            output_dir: Output directory for generated shorts
-
-        Returns:
-            List of paths to generated short videos
         """
         output_dir = output_dir or settings.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -91,21 +84,29 @@ class ShortGeneratorPipeline:
             self._update_progress("downloading", 0.0)
             metadata = await self.downloader.download(url)
             self._update_progress("downloading", 1.0)
-            logger.info(f"Downloaded: {metadata.title} ({metadata.duration:.1f}s)")
 
             # Stage 2: Parallel Analysis
             self._update_progress("analyzing", 0.0)
             analysis_results = await self._run_analysis(metadata)
             self._update_progress("analyzing", 1.0)
-            logger.info("Analysis complete")
 
-            # Stage 3: Segment Generation & Scoring
+            # Stage 3: Segment Generation
             self._update_progress("scoring", 0.0)
-            segments = self._generate_segments(metadata, analysis_results)
-            scored_segments = self.scorer.score_segments(segments)
+            
+            if use_sliding_window:
+                # Use sliding window logic from pipeline_old.py
+                candidate_segments = self._generate_sliding_window_segments(metadata, analysis_results)
+            else:
+                # Use LLM highlight logic from pipeline.py
+                candidate_segments = self._generate_llm_segments(metadata, analysis_results)
 
-            # Remove overlapping segments and take top N
-            top_segments = self._select_best_segments(scored_segments, num_shorts)
+            # Score and rank segments
+            scored_segments = self.scorer.score_segments(candidate_segments)
+            
+            # Selection: If all_segments is True, we don't cap the count
+            selection_limit = None if all_segments else num_shorts
+            top_segments = self._select_best_segments(scored_segments, selection_limit)
+            
             self._update_progress("scoring", 1.0)
             logger.info(f"Selected {len(top_segments)} segments")
 
@@ -122,10 +123,8 @@ class ShortGeneratorPipeline:
                     index=i,
                 )
                 output_paths.append(output_path)
-                logger.info(f"Generated short {i + 1}/{len(top_segments)}: {output_path.name}")
 
             self._update_progress("complete", 1.0)
-            logger.info(f"Pipeline complete: generated {len(output_paths)} shorts")
             return output_paths
 
         except Exception as e:
@@ -136,34 +135,18 @@ class ShortGeneratorPipeline:
         """Run all analysis tasks in parallel."""
         video_path = metadata.file_path
 
-        # These can run concurrently
-        transcript_task = asyncio.create_task(
-            self.transcriber.transcribe(
-                video_path,
-                subtitle_path=getattr(metadata, 'subtitle_path', None),
-            )
-        )
-        audio_task = asyncio.create_task(
-            self.audio_analyzer.analyze(video_path)
-        )
-        scene_task = asyncio.create_task(
-            self.scene_detector.detect(video_path)
-        )
-        face_task = asyncio.create_task(
+        tasks = [
+            self.transcriber.transcribe(video_path, subtitle_path=getattr(metadata, 'subtitle_path', None)),
+            self.audio_analyzer.analyze(video_path),
+            self.scene_detector.detect(video_path),
             self.face_tracker.track(video_path)
-        )
+        ]
+        
+        transcript, audio_energy, scenes, face_positions = await asyncio.gather(*tasks)
 
-        transcript, audio_energy, scenes, face_positions = await asyncio.gather(
-            transcript_task, audio_task, scene_task, face_task
-        )
-
-        # LLM analysis depends on transcript (if transcript exists)
         highlights = []
         if transcript.get("text"):
-            highlights = await self.highlight_finder.find_highlights(
-                transcript["text"],
-                metadata.duration,
-            )
+            highlights = await self.highlight_finder.find_highlights(transcript["text"], metadata.duration)
 
         return {
             "transcript": transcript,
@@ -173,249 +156,106 @@ class ShortGeneratorPipeline:
             "highlights": highlights,
         }
 
-    def _generate_segments(
-        self,
-        metadata: VideoMetadata,
-        analysis: dict,
-    ) -> list[Segment]:
-        """Generate candidate segments from analysis results."""
-        segments: list[Segment] = []
-        duration = metadata.duration
+    def _generate_llm_segments(self, metadata: VideoMetadata, analysis: dict) -> list[Segment]:
+        """Generate segments based on LLM detected highlights."""
+        highlights = analysis.get("highlights", [])
+        segments = []
+        for h in highlights:
+            start, end = float(h.get("start", 0.0)), float(h.get("end", 0.0))
+            if end <= start: continue
 
-        # Sliding window approach
+            segments.append(self._create_segment_object(start, end, float(h.get("score", 0.0)), analysis))
+        return segments
+
+    def _generate_sliding_window_segments(self, metadata: VideoMetadata, analysis: dict) -> list[Segment]:
+        """Generate segments using sliding window approach from pipeline_old.py."""
+        segments = []
+        duration = metadata.duration
         window_size = settings.max_segment_duration
         step_size = window_size * (1 - settings.segment_overlap)
 
         current_time = 0.0
         while current_time + settings.min_segment_duration <= duration:
             end_time = min(current_time + window_size, duration)
-
-            # Skip if segment too short
-            if end_time - current_time < settings.min_segment_duration:
-                break
-
-            segment = Segment(
-                start_time=current_time,
-                end_time=end_time,
-                audio_energy=self._get_audio_energy_for_range(
-                    analysis["audio_energy"], current_time, end_time
-                ),
-                scene_changes=self._count_scenes_in_range(
-                    analysis["scenes"], current_time, end_time
-                ),
-                face_presence=self._get_face_presence_for_range(
-                    analysis["face_positions"], current_time, end_time
-                ),
-                transcript=self._get_transcript_for_range(
-                    analysis["transcript"], current_time, end_time
-                ),
-                transcript_words=self._get_transcript_words_for_range(
-                    analysis["transcript"], current_time, end_time
-                ),
-                highlight_score=self._get_highlight_score_for_range(
-                    analysis["highlights"], current_time, end_time
-                ),
-            )
-            segments.append(segment)
+            
+            highlight_score = self._get_highlight_score_for_range(analysis["highlights"], current_time, end_time)
+            
+            segments.append(self._create_segment_object(current_time, end_time, highlight_score, analysis))
             current_time += step_size
-
         return segments
 
-    def _select_best_segments(
-        self,
-        segments: list[Segment],
-        num_shorts: int,
-    ) -> list[Segment]:
-        """Select top segments, removing overlapping ones."""
-        sorted_segments = sorted(segments, key=lambda s: s.final_score, reverse=True)
+    def _create_segment_object(self, start: float, end: float, h_score: float, analysis: dict) -> Segment:
+        """Helper to build Segment model with common analysis data."""
+        return Segment(
+            start_time=start,
+            end_time=end,
+            audio_energy=self._get_audio_energy_for_range(analysis["audio_energy"], start, end),
+            scene_changes=self._count_scenes_in_range(analysis["scenes"], start, end),
+            face_presence=self._get_face_presence_for_range(analysis["face_positions"], start, end),
+            transcript=self._get_transcript_for_range(analysis["transcript"], start, end),
+            transcript_words=self._get_transcript_words_for_range(analysis["transcript"], start, end),
+            highlight_score=h_score,
+        )
 
+    def _select_best_segments(self, segments: list[Segment], limit: Optional[int]) -> list[Segment]:
+        """Select top segments while removing overlapping ones."""
+        sorted_segments = sorted(segments, key=lambda s: s.final_score, reverse=True)
         selected: list[Segment] = []
+        
         for segment in sorted_segments:
-            if len(selected) >= num_shorts:
+            if limit and len(selected) >= limit:
                 break
 
-            # Check for overlap with already selected segments
-            has_overlap = any(
-                segment.overlaps_with(selected_seg, threshold=0.3)
-                for selected_seg in selected
-            )
-
-            if not has_overlap:
+            # Prevent rendering overlapping content
+            if not any(segment.overlaps_with(s, threshold=0.3) for s in selected):
                 selected.append(segment)
 
         return selected
 
-    async def _process_segment(
-        self,
-        metadata: VideoMetadata,
-        segment: Segment,
-        analysis_results: dict,
-        platform: Platform,
-        output_dir: Path,
-        index: int,
-    ) -> Path:
-        """Process a single segment into a short."""
-        # Extract clip
-        clip_path = await self.clipper.extract(
-            video_path=metadata.file_path,
-            start_time=segment.start_time,
-            end_time=segment.end_time,
-        )
+    async def _process_segment(self, metadata: VideoMetadata, segment: Segment, analysis_results: dict, 
+                               platform: Platform, output_dir: Path, index: int) -> Path:
+        """Extracts, crops, and renders a single segment."""
+        clip_path = await self.clipper.extract(metadata.file_path, segment.start_time, segment.end_time)
+        
+        face_positions = self._filter_face_positions(analysis_results["face_positions"], segment.start_time, segment.end_time)
+        crop_windows = self.cropper.calculate_crop_windows(metadata.resolution, (9, 16), face_positions, metadata.fps, segment.duration)
+        
+        captions = self.captioner.generate(words=segment.transcript_words)
 
-        # Calculate smart crop based on face positions
-        face_positions = self._filter_face_positions(
-            analysis_results["face_positions"],
-            segment.start_time,
-            segment.end_time,
-        )
-        crop_windows = self.cropper.calculate_crop_windows(
-            source_resolution=metadata.resolution,
-            target_aspect_ratio=(9, 16),
-            face_positions=face_positions,
-            fps=metadata.fps,
-            duration=segment.duration,
-        )
-
-        # Generate captions
-        captions = self.captioner.generate(
-            words=segment.transcript_words,
-        )
-
-        # Render final output
-        output_filename = f"short_{index:02d}_{int(segment.start_time)}s.mp4"
+        # Unified naming convention
+        output_filename = f"short_{metadata.video_id}_{index:02d}_{int(segment.start_time)}s.mp4"
         output_path = output_dir / output_filename
 
-        await self.renderer.render(
-            input_path=clip_path,
-            output_path=output_path,
-            crop_windows=crop_windows,
-            captions=captions,
-            platform=platform,
-        )
-
+        await self.renderer.render(clip_path, output_path, crop_windows, captions, platform)
         return output_path
 
-    # ==================== Helper Methods ====================
+    # ==================== Helper Methods (Shared Logic) ====================
 
-    def _get_audio_energy_for_range(
-        self,
-        energy_data: list[tuple[float, float]],
-        start: float,
-        end: float,
-    ) -> float:
-        """Get average audio energy in time range."""
-        if not energy_data:
-            return 0.0
-
-        values = [
-            energy for timestamp, energy in energy_data
-            if start <= timestamp <= end
-        ]
+    def _get_audio_energy_for_range(self, energy_data, start, end):
+        values = [e for t, e in energy_data if start <= t <= end]
         return sum(values) / len(values) if values else 0.0
 
-    def _count_scenes_in_range(
-        self,
-        scenes: list[float],
-        start: float,
-        end: float,
-    ) -> int:
-        """Count scene changes in time range."""
+    def _count_scenes_in_range(self, scenes, start, end):
         return sum(1 for scene_time in scenes if start <= scene_time <= end)
 
-    def _get_face_presence_for_range(
-        self,
-        face_positions: list[FacePosition],
-        start: float,
-        end: float,
-    ) -> float:
-        """Get percentage of frames with faces in range."""
-        if not face_positions:
-            return 0.0
-
-        relevant = [
-            fp for fp in face_positions
-            if start <= fp.timestamp <= end
-        ]
-
-        if not relevant:
-            return 0.0
-
-        # Calculate expected number of frames
-        duration = end - start
-        # Assuming face tracking was done at some sample rate
-        # For now, return ratio of frames with confident detections
+    def _get_face_presence_for_range(self, face_positions, start, end):
+        relevant = [fp for fp in face_positions if start <= fp.timestamp <= end]
         confident = sum(1 for fp in relevant if fp.confidence > 0.5)
         return confident / len(relevant) if relevant else 0.0
 
-    def _get_transcript_for_range(
-        self,
-        transcript: dict,
-        start: float,
-        end: float,
-    ) -> str:
-        """Extract transcript text for time range."""
+    def _get_transcript_for_range(self, transcript, start, end):
         words = transcript.get("words", [])
-        relevant_words = [
-            w["word"] for w in words
-            if start <= w.get("start", 0) <= end
-        ]
-        return " ".join(relevant_words)
+        return " ".join([w["word"] for w in words if start <= w.get("start", 0) <= end])
 
-    def _get_transcript_words_for_range(
-        self,
-        transcript: dict,
-        start: float,
-        end: float,
-    ) -> list:
-        """Extract transcript words with timing for range."""
-        from shortgen.core.models import TranscriptWord
+    def _get_transcript_words_for_range(self, transcript, start, end):
+        return [TranscriptWord(word=w["word"], start=w["start"] - start, end=w["end"] - start, confidence=w.get("confidence", 1.0))
+                for w in transcript.get("words", []) if start <= w.get("start", 0) <= end]
 
-        words = transcript.get("words", [])
-        return [
-            TranscriptWord(
-                word=w["word"],
-                start=w["start"] - start,  # Normalize to segment start
-                end=w["end"] - start,
-                confidence=w.get("confidence", 1.0),
-            )
-            for w in words
-            if start <= w.get("start", 0) <= end
-        ]
-
-    def _get_highlight_score_for_range(
-        self,
-        highlights: list[dict],
-        start: float,
-        end: float,
-    ) -> float:
-        """Get LLM highlight score for time range."""
-        if not highlights:
-            return 0.0
-
-        scores = [
-            h.get("score", 0.0)
-            for h in highlights
-            if start <= h.get("start", 0) <= end or start <= h.get("end", 0) <= end
-        ]
+    def _get_highlight_score_for_range(self, highlights, start, end):
+        scores = [h.get("score", 0.0) for h in highlights if start <= h.get("start", 0) <= end or start <= h.get("end", 0) <= end]
         return max(scores) if scores else 0.0
 
-    def _filter_face_positions(
-        self,
-        positions: list[FacePosition],
-        start: float,
-        end: float,
-    ) -> list[FacePosition]:
-        """Filter face positions to time range."""
-        return [
-            FacePosition(
-                frame_number=fp.frame_number,
-                timestamp=fp.timestamp - start,  # Normalize to segment start
-                center_x=fp.center_x,
-                center_y=fp.center_y,
-                width=fp.width,
-                height=fp.height,
-                confidence=fp.confidence,
-            )
-            for fp in positions
-            if start <= fp.timestamp <= end
-        ]
+    def _filter_face_positions(self, positions, start, end):
+        return [FacePosition(frame_number=fp.frame_number, timestamp=fp.timestamp - start, center_x=fp.center_x, 
+                             center_y=fp.center_y, width=fp.width, height=fp.height, confidence=fp.confidence)
+                for fp in positions if start <= fp.timestamp <= end]

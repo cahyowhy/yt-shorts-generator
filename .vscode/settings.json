@@ -1,0 +1,27 @@
+{
+    "files.exclude": {
+        "**/.git": true,
+        "**/.svn": true,
+        "**/.hg": true,
+        "**/.DS_Store": true,
+        "**/Thumbs.db": true,
+        "**/flutter/ephemeral": true,
+        "**/Flutter/ephemeral": true,
+        "**/.symlinks": true,
+        "**/.plugin_symlinks": true,
+        "**/.dart_tool": true,
+        "**/.deployment": true,
+        "**/.github": true,
+        "**/.idea": true,
+        "**/.next": true,
+        "**/.vscode": true,
+        "**/build": true,
+        "**/linux": true,
+        "**/macos": true,
+        "**/node_modules": true,
+        "**/.retool_types/**": true,
+        "**/*tsconfig.json": true,
+        ".cache": true,
+        "retool.config.json": true
+    }
+}

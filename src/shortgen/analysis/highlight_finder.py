@@ -85,21 +85,18 @@ class HighlightFinder:
     ) -> str:
         """Build prompt for highlight detection."""
 
-        # Truncate transcript if too long
-        max_chars = 8000
-        if len(transcript) > max_chars:
-            transcript = transcript[:max_chars] + "..."
-
-        return f"""Analyze this video transcript and identify the {num_highlights} most engaging moments that would make great short-form video clips (15-60 seconds each).
+        return f"""Analyze this video transcript and identify the {num_highlights} most engaging moments that would make great short-form video clips (15-120 seconds each).
 
 VIDEO DURATION: {video_duration:.0f} seconds
 
 TRANSCRIPT:
+```
 {transcript}
+```
 
 For each highlight, identify:
-1. Approximate start time (in seconds from video start)
-2. Approximate end time
+1. Exact start time (in seconds, capturing the start of the thought)
+2. Exact end time (in seconds, after the thought is fully completed)
 3. Engagement score (0.0 to 1.0)
 4. Brief reason why this would make a good short
 
@@ -109,13 +106,13 @@ Look for:
 - Key insights or "aha" moments
 - Quotable statements
 - Dramatic tension or conflict
-- Clear, self-contained ideas
+- Clear, self-contained ideas that make sense without surrounding context
 
 Respond ONLY with valid JSON in this exact format:
 {{
     "highlights": [
-        {{"start": 0, "end": 30, "score": 0.9, "reason": "Opening hook with surprising statistic"}},
-        {{"start": 120, "end": 165, "score": 0.85, "reason": "Funny anecdote about..."}}
+        {{"start": 0, "end": 34, "score": 0.9, "reason": "Opening hook with surprising statistic. Ends on a complete thought."}},
+        {{"start": 120, "end": 172, "score": 0.85, "reason": "Funny anecdote about the topic. Ends exactly after the punchline."}}
     ]
 }}"""
 

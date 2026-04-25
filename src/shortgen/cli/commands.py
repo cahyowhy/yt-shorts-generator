@@ -29,109 +29,24 @@ console = Console()
 
 @app.command()
 def generate(
-    url: str = typer.Argument(..., help="YouTube video URL"),
-    output: Path = typer.Option(
-        None,
-        "--output", "-o",
-        help="Output directory (default: ./output)",
-    ),
-    platform: Platform = typer.Option(
-        Platform.YOUTUBE_SHORTS,
-        "--platform", "-p",
-        help="Target platform",
-    ),
-    count: int = typer.Option(
-        5,
-        "--count", "-n",
-        help="Number of shorts to generate",
-    ),
-    audio_weight: float = typer.Option(
-        0.25,
-        "--audio-weight",
-        help="Weight for audio energy (0-1)",
-    ),
-    scene_weight: float = typer.Option(
-        0.15,
-        "--scene-weight",
-        help="Weight for scene activity (0-1)",
-    ),
-    face_weight: float = typer.Option(
-        0.20,
-        "--face-weight",
-        help="Weight for face presence (0-1)",
-    ),
-    highlight_weight: float = typer.Option(
-        0.40,
-        "--highlight-weight",
-        help="Weight for LLM highlight score (0-1)",
-    ),
-) -> None:
-    """Generate shorts from a YouTube video."""
-
-    output_dir = output or settings.output_dir
-
-    weights = ScoringWeights(
-        audio_energy=audio_weight,
-        scene_activity=scene_weight,
-        face_presence=face_weight,
-        highlight_score=highlight_weight,
-    ).normalize()
-
-    console.print(f"\n[bold blue]ShortGen[/bold blue] - Generating {count} shorts")
-    console.print(f"URL: {url}")
-    console.print(f"Platform: {platform.value}")
-    console.print(f"Output: {output_dir}\n")
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TimeElapsedColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Initializing...", total=100)
-
-        def update_progress(stage: str, pct: float) -> None:
-            description = stage.replace("_", " ").capitalize()
-            progress.update(task, description=description, completed=pct * 100)
-
-        pipeline = ShortGeneratorPipeline(
-            weights=weights,
-            progress_callback=update_progress,
-        )
-
-        try:
-            output_paths = asyncio.run(
-                pipeline.process(
-                    url=url,
-                    platform=platform,
-                    num_shorts=count,
-                    output_dir=output_dir,
-                )
-            )
-
-            progress.update(task, description="Complete!", completed=100)
-
-        except Exception as e:
-            console.print(f"\n[red]Error:[/red] {e}")
-            raise typer.Exit(1)
-
-    # Display results
-    console.print(f"\n[green]✓ Generated {len(output_paths)} shorts:[/green]\n")
-
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("#", style="dim", width=3)
-    table.add_column("File")
-    table.add_column("Size", justify="right")
-
-    for i, path in enumerate(output_paths, 1):
-        size_mb = path.stat().st_size / (1024 * 1024)
-        table.add_row(str(i), path.name, f"{size_mb:.1f} MB")
-
-    console.print(table)
-    console.print(f"\n[dim]Output directory: {output_dir}[/dim]")
-
+    url: str,
+    output: Path = typer.Option(None, "--output", "-o", help="Output directory"),
+    platform: Platform = typer.Option(Platform.YOUTUBE_SHORTS, "--platform", "-p"),
+    count: int = typer.Option(5, "--count", "-c", help="Number of shorts to generate"),
+    all_segments: bool = typer.Option(False, "--all-segments", help="Render all segments found by the LLM"),
+    sliding_window: bool = typer.Option(True, "--sliding-window", help="Use sliding window instead of LLM highlights")
+):
+    pipeline = ShortGeneratorPipeline()
+    
+    import asyncio
+    asyncio.run(pipeline.process(
+        url=url,
+        platform=platform,
+        num_shorts=count,
+        output_dir=output,
+        all_segments=all_segments,
+        use_sliding_window=sliding_window
+    ))
 
 @app.command()
 def info(

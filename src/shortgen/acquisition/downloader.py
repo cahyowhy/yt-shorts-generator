@@ -13,6 +13,9 @@ from shortgen.config import settings
 from shortgen.core.exceptions import DownloadError
 from shortgen.core.models import VideoMetadata
 
+from pathlib import Path
+
+COOKIE_PATH = Path.cwd() / 'cookies.txt'
 
 class VideoDownloader:
     """Download videos from YouTube using yt-dlp."""
@@ -47,6 +50,7 @@ class VideoDownloader:
             "no_warnings": True,
             "extract_flat": False,
             "socket_timeout": 30,
+            '--cookies': COOKIE_PATH,
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             },
@@ -67,6 +71,7 @@ class VideoDownloader:
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             },
+            '--cookies': COOKIE_PATH,
             "extractor_args": {
                 "youtube": {
                     "skip_webpage": True,
@@ -105,6 +110,8 @@ class VideoDownloader:
             logger.info("Extracting video info...")
             info_opts = {
                 "quiet": True,
+                "--user-agent": 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36', 
+                '--cookies': COOKIE_PATH,
                 "no_warnings": True,
                 "extract_flat": False,
                 "skip_download": True,
