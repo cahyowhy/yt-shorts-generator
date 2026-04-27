@@ -34,10 +34,8 @@ def generate(
     platform: Platform = typer.Option(Platform.YOUTUBE_SHORTS, "--platform", "-p"),
     count: int = typer.Option(5, "--count", "-c", help="Number of shorts to generate"),
     all_segments: bool = typer.Option(False, "--all-segments", help="Render all segments found by the LLM"),
-    sliding_window: bool = typer.Option(True, "--sliding-window", help="Use sliding window instead of LLM highlights")
 ):
     pipeline = ShortGeneratorPipeline()
-    
     import asyncio
     asyncio.run(pipeline.process(
         url=url,
@@ -45,7 +43,6 @@ def generate(
         num_shorts=count,
         output_dir=output,
         all_segments=all_segments,
-        use_sliding_window=sliding_window
     ))
 
 @app.command()

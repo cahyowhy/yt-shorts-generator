@@ -182,7 +182,7 @@ class VideoDownloader:
             info: Video info dict from yt-dlp
             
         Returns:
-            Language code (e.g., 'en', 'id', 'id-orig')
+            Language code (e.g., 'en', 'id', 'ko', 'ko-orig', 'id-orig')
         """
         auto_captions = info.get("automatic_captions", {})
         subtitles = info.get("subtitles", {})
@@ -241,6 +241,9 @@ class VideoDownloader:
         
         if original_lang != "en":
             langs_to_try.append("en")
+            
+        if original_lang != "ko":
+            langs_to_try.append("ko")
         
         logger.info(f"Attempting to download subtitles for languages: {langs_to_try}")
 

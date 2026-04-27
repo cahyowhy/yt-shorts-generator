@@ -85,7 +85,7 @@ class HighlightFinder:
     ) -> str:
         """Build prompt for highlight detection."""
 
-        return f"""Analyze this video transcript and identify the {num_highlights} most engaging moments that would make great short-form video clips (15-120 seconds each).
+        return f"""Analyze this video transcript and identify the {num_highlights} most engaging moments that would make great short-form video clips (15-90 seconds each).
 
 VIDEO DURATION: {video_duration:.0f} seconds
 

@@ -28,7 +28,7 @@ class Transcriber:
 
     def __init__(
         self,
-        model_name: Literal["tiny", "base", "small", "medium", "large"] = "base",
+        model_name: Literal["tiny", "base", "small", "medium", "large"] = "small",
         device: Optional[str] = None,
     ):
         self.model_name = model_name
@@ -103,7 +103,7 @@ class Transcriber:
                 logger.info("No subtitle file provided, using Whisper for transcription")
 
             # Fallback to Whisper
-            return self._transcribe_with_whisper(video_path)
+            return self.transcribe_with_whisper(video_path)
 
         except Exception as e:
             raise TranscriptionError(f"Transcription failed: {e}") from e
@@ -129,7 +129,7 @@ class Transcriber:
             if ext == ".vtt":
                 return self._parse_vtt(path)
             elif ext == ".srt":
-                return self._parse_srt(path)
+                return self.parse_srt(path)
             elif ext == ".ass":
                 return self._parse_ass(path)
             else:
@@ -211,7 +211,7 @@ class Transcriber:
             "language": "en",
         }
 
-    def _parse_srt(self, path: Path) -> dict:
+    def parse_srt(self, path: Path) -> dict:
         """Parse SRT subtitle file."""
         text_parts = []
         words = []
@@ -398,7 +398,7 @@ class Transcriber:
         import re
         return re.sub(r"\{\\[^}]*\}", "", text)
 
-    def _transcribe_with_whisper(self, video_path: str) -> dict:
+    def transcribe_with_whisper(self, video_path: str) -> dict:
         """Transcribe audio using Whisper model."""
         logger.info("Using Whisper for transcription")
         model = self._load_model()

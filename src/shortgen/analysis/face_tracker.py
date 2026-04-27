@@ -68,7 +68,6 @@ class FaceTracker:
             import mediapipe as mp
             from mediapipe.tasks import python
             from mediapipe.tasks.python import vision
-            from tqdm import tqdm  # <--- Added import
 
             if not Path(self.model_path).exists():
                 raise FileNotFoundError(
@@ -100,7 +99,12 @@ class FaceTracker:
             tracked_faces = {} 
             next_face_id = 0
 
-            # Initialize the Progress Bar
+            # === NEW: Sticky Focus Variables ===
+            active_face_id = None
+            frames_since_switch = 0
+            missing_frames = 0  # <--- Moved to a standalone variable
+            cooldown_frames = int(fps * 1.5)
+
             with tqdm(total=total_frames, desc="Tracking Faces", unit="fr") as pbar:
                 while True:
                     ret, frame = cap.read()
@@ -110,14 +114,12 @@ class FaceTracker:
                     if frame_number % self.sample_rate == 0:
                         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-                        
                         results = landmarker.detect(mp_image)
                         timestamp = frame_number / fps
-
                         current_frame_faces = []
 
                         if results.face_landmarks:
-                            # ... [Existing processing logic for landmarks] ...
+                            # ... [Coordinate and MAR math stays the same] ...
                             for i, landmarks in enumerate(results.face_landmarks):
                                 x_coords = [lm.x for lm in landmarks]
                                 y_coords = [lm.y for lm in landmarks]
@@ -154,17 +156,49 @@ class FaceTracker:
                                     }
                                     next_face_id += 1
 
-                            best_face = None
-                            max_movement = -1.0
+                            # === FIXED: Grace Period Logic ===
+                            face_scores = {}
                             for face in current_frame_faces:
                                 history = tracked_faces[face['id']]['mar_history']
-                                movement = max(history) - min(history) if len(history) > 1 else 0.0
-                                if movement > max_movement:
-                                    max_movement = movement
-                                    best_face = face
+                                face_scores[face['id']] = max(history) - min(history) if len(history) > 1 else 0.0
 
-                            if max_movement < 0.02 and current_frame_faces:
-                                best_face = max(current_frame_faces, key=lambda f: f['width'] * f['height'])
+                            best_face = None
+                            active_face_present = any(f['id'] == active_face_id for f in current_frame_faces)
+
+                            if not active_face_present and active_face_id is not None:
+                                missing_frames += self.sample_rate
+                                if missing_frames > int(fps * 1.0):
+                                    active_face_id = None
+                                    missing_frames = 0
+                            else:
+                                missing_frames = 0
+
+                            if active_face_id is None and current_frame_faces:
+                                best_face = max(current_frame_faces, key=lambda f: face_scores[f['id']])
+                                if face_scores[best_face['id']] < 0.02:
+                                    best_face = max(current_frame_faces, key=lambda f: f['width'] * f['height'])
+                                active_face_id = best_face['id']
+                                frames_since_switch = 0
+                            elif current_frame_faces:
+                                current_score = face_scores.get(active_face_id, 0.0)
+                                challengers = [f for f in current_frame_faces if f['id'] != active_face_id]
+                                
+                                if challengers:
+                                    top_challenger = max(challengers, key=lambda f: face_scores[f['id']])
+                                    challenger_score = face_scores[top_challenger['id']]
+                                    
+                                    if challenger_score > (current_score + 0.015) and frames_since_switch > cooldown_frames:
+                                        active_face_id = top_challenger['id']
+                                        best_face = top_challenger
+                                        frames_since_switch = 0
+                                    else:
+                                        active_faces = [f for f in current_frame_faces if f['id'] == active_face_id]
+                                        best_face = active_faces[0] if active_faces else None
+                                else:
+                                    active_faces = [f for f in current_frame_faces if f['id'] == active_face_id]
+                                    best_face = active_faces[0] if active_faces else None
+
+                            frames_since_switch += self.sample_rate
 
                             if best_face:
                                 face_positions.append(
@@ -176,6 +210,13 @@ class FaceTracker:
                                     )
                                 )
                         else:
+                            # Add to missing frames if no faces detected at all but we had an active target
+                            if active_face_id is not None:
+                                missing_frames += self.sample_rate
+                                if missing_frames > int(fps * 1.0):
+                                    active_face_id = None
+                                    missing_frames = 0
+                                    
                             face_positions.append(
                                 FacePosition(
                                     frame_number=frame_number, timestamp=timestamp,
@@ -184,7 +225,7 @@ class FaceTracker:
                             )
 
                     frame_number += 1
-                    pbar.update(1) # Update progress bar every frame
+                    pbar.update(1)
 
                     # Log every 10% instead of every 30 seconds
                     if frame_number % max(1, (total_frames // 10)) == 0:

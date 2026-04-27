@@ -28,10 +28,13 @@ class Settings(BaseSettings):
     # LLM settings (Ollama)
     ollama_base_url: str = Field(default="http://localhost:11434")
     ollama_model: str = Field(default="mistral")
+    
+    gemini_api_key: str = Field(default="")
+    gemini_model: str = Field(default="gemini-3.1-pro-preview")
 
     # Processing settings
-    min_segment_duration: float = Field(default=15.0)
-    max_segment_duration: float = Field(default=60.0)
+    min_segment_duration: float = Field(default=45.0)
+    max_segment_duration: float = Field(default=90.0)
     target_segments: int = Field(default=5)
     segment_overlap: float = Field(default=0.5)  # 50% overlap between windows
 

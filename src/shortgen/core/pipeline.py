@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+import re
 from typing import Callable, Optional
 
 from loguru import logger
@@ -9,7 +10,7 @@ from loguru import logger
 from shortgen.acquisition.downloader import VideoDownloader
 from shortgen.analysis.audio_analyzer import AudioAnalyzer
 from shortgen.analysis.face_tracker import FaceTracker
-from shortgen.analysis.highlight_finder import HighlightFinder
+from shortgen.analysis.gemini_highlight_finder import GeminiHighlightFinder
 from shortgen.analysis.scene_detector import SceneDetector
 from shortgen.analysis.transcription import Transcriber
 from shortgen.config import settings
@@ -51,7 +52,7 @@ class ShortGeneratorPipeline:
         self.audio_analyzer = AudioAnalyzer()
         self.scene_detector = SceneDetector()
         self.face_tracker = FaceTracker()
-        self.highlight_finder = HighlightFinder()
+        self.highlight_finder = GeminiHighlightFinder()
         self.scorer = SegmentScorer(weights=self.weights)
         self.clipper = VideoClipper()
         self.cropper = SmartCropper()
@@ -64,6 +65,42 @@ class ShortGeneratorPipeline:
             self.progress_callback(stage, progress)
         logger.info(f"Pipeline progress: {stage} - {progress:.1%}")
 
+    async def translate_whisper(self):
+        res = await Transcriber().transcribe("data/downloads/VJINzo0R2Cw.mp4")    
+        logger.info(res["text"])
+    
+    async def test(self, input_file):
+        with open(input_file, 'r', encoding='utf-8') as file:
+            content = file.read()
+            await self.highlight_finder.find_highlights(content, 6000, 10)
+    
+    def convert_srt_to_seconds(self, input_file, output_file):
+        with open(input_file, 'r', encoding='utf-8') as file:
+            content = file.read()
+
+        # Regex to capture the standard SRT timestamp format
+        def timestamp_to_sec(match):
+            def parse_time(t_str):
+                h, m, s = t_str.split(':')
+                s, ms = s.split(',')
+                # Convert to total seconds
+                return str(int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000)
+
+            start_sec = parse_time(match.group(1))
+            end_sec = parse_time(match.group(2))
+            return f"{start_sec} --> {end_sec}"
+
+        # Find and replace all timestamps in the file
+        converted_content = re.sub(
+            r'(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})', 
+            timestamp_to_sec, 
+            content
+        )
+
+        with open(output_file, 'w', encoding='utf-8') as file:
+            file.write(converted_content)
+        print(f"Conversion complete! Saved to {output_file}")
+    
     async def process(
         self,
         url: str,
@@ -71,13 +108,16 @@ class ShortGeneratorPipeline:
         num_shorts: int = 5,
         output_dir: Optional[Path] = None,
         all_segments: bool = False,
-        use_sliding_window: bool = False,
     ) -> list[Path]:
         """
         Main processing pipeline.
         """
         output_dir = output_dir or settings.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
+        
+        use_sliding_window = not all_segments
+        
+        logger.info("use_sliding_window" if use_sliding_window else "all_segments")
 
         try:
             # Stage 1: Download
@@ -102,18 +142,16 @@ class ShortGeneratorPipeline:
 
             # Score and rank segments
             scored_segments = self.scorer.score_segments(candidate_segments)
-            
-            # Selection: If all_segments is True, we don't cap the count
-            selection_limit = None if all_segments else num_shorts
-            top_segments = self._select_best_segments(scored_segments, selection_limit)
+            if use_sliding_window:
+                scored_segments = self._select_best_segments(scored_segments, num_shorts)
             
             self._update_progress("scoring", 1.0)
-            logger.info(f"Selected {len(top_segments)} segments")
+            logger.info(f"Selected {len(scored_segments)} segments")
 
             # Stage 4: Process Each Segment
             output_paths: list[Path] = []
-            for i, segment in enumerate(top_segments):
-                self._update_progress("processing", i / len(top_segments))
+            for i, segment in enumerate(scored_segments):
+                self._update_progress("processing", i / len(scored_segments))
                 output_path = await self._process_segment(
                     metadata=metadata,
                     segment=segment,
@@ -143,10 +181,7 @@ class ShortGeneratorPipeline:
         ]
         
         transcript, audio_energy, scenes, face_positions = await asyncio.gather(*tasks)
-
-        highlights = []
-        if transcript.get("text"):
-            highlights = await self.highlight_finder.find_highlights(transcript["text"], metadata.duration)
+        highlights = await self.highlight_finder.find_highlights(metadata.subtitle_path, metadata.duration)
 
         return {
             "transcript": transcript,
@@ -169,19 +204,46 @@ class ShortGeneratorPipeline:
 
     def _generate_sliding_window_segments(self, metadata: VideoMetadata, analysis: dict) -> list[Segment]:
         """Generate segments using sliding window approach from pipeline_old.py."""
-        segments = []
+        segments: list[Segment] = []
         duration = metadata.duration
+
+        # Sliding window approach
         window_size = settings.max_segment_duration
         step_size = window_size * (1 - settings.segment_overlap)
 
         current_time = 0.0
         while current_time + settings.min_segment_duration <= duration:
             end_time = min(current_time + window_size, duration)
-            
-            highlight_score = self._get_highlight_score_for_range(analysis["highlights"], current_time, end_time)
-            
-            segments.append(self._create_segment_object(current_time, end_time, highlight_score, analysis))
+
+            # Skip if segment too short
+            if end_time - current_time < settings.min_segment_duration:
+                break
+
+            segment = Segment(
+                start_time=current_time,
+                end_time=end_time,
+                audio_energy=self._get_audio_energy_for_range(
+                    analysis["audio_energy"], current_time, end_time
+                ),
+                scene_changes=self._count_scenes_in_range(
+                    analysis["scenes"], current_time, end_time
+                ),
+                face_presence=self._get_face_presence_for_range(
+                    analysis["face_positions"], current_time, end_time
+                ),
+                transcript=self._get_transcript_for_range(
+                    analysis["transcript"], current_time, end_time
+                ),
+                transcript_words=self._get_transcript_words_for_range(
+                    analysis["transcript"], current_time, end_time
+                ),
+                highlight_score=self._get_highlight_score_for_range(
+                    analysis["highlights"], current_time, end_time
+                ),
+            )
+            segments.append(segment)
             current_time += step_size
+
         return segments
 
     def _create_segment_object(self, start: float, end: float, h_score: float, analysis: dict) -> Segment:

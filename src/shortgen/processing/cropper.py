@@ -74,7 +74,7 @@ class SmartCropper:
         # Build frame-by-frame target positions from face data
         total_frames = int(fps * duration)
         target_positions = self._interpolate_face_positions(
-            face_positions, total_frames, fps
+            face_positions, total_frames, fps, src_width, crop_width 
         )
 
         # Apply smoothing to reduce jitter
@@ -111,8 +111,10 @@ class SmartCropper:
         face_positions: list[FacePosition],
         total_frames: int,
         fps: float,
+        src_width: int = 1920,
+        crop_width: int = 1080,
     ) -> list[float]:
-        """Interpolate face positions to get one value per frame."""
+        """Interpolate face positions using exact pixel centering math."""
         if not face_positions:
             return [self.default_position] * total_frames
 
@@ -121,11 +123,8 @@ class SmartCropper:
         for fp in face_positions:
             frame = int(fp.timestamp * fps)
             if fp.confidence > 0.3:
-                # Convert center_x to crop position
-                # If face is at 0.3 (left), we want crop at ~0.0 (left edge)
-                # If face is at 0.7 (right), we want crop at ~1.0 (right edge)
-                # Adjust to keep face roughly centered in crop
-                position_map[frame] = self._face_to_crop_position(fp.center_x)
+                # Calculate the exact normalized crop position to center this face
+                position_map[frame] = self._exact_face_to_crop(fp.center_x, src_width, crop_width)
 
         # Interpolate missing frames
         result = []
@@ -138,19 +137,27 @@ class SmartCropper:
 
         return result
 
-    def _face_to_crop_position(self, face_center_x: float) -> float:
+    def _exact_face_to_crop(self, face_center_x: float, src_width: int, crop_width: int) -> float:
         """
-        Convert face center position to crop window position.
-
-        We want the face to be roughly centered in the crop window.
+        Calculates the exact normalized position [0.0 - 1.0] needed to perfectly 
+        center the face in the cropped window.
         """
-        # Map face position to crop position
-        # face_center_x = 0.5 should give crop_pos = 0.5 (centered)
-        # face_center_x = 0.3 should give crop_pos closer to 0 (move crop left)
-        # face_center_x = 0.7 should give crop_pos closer to 1 (move crop right)
-
-        # Simple linear mapping with bias toward center
-        crop_pos = (face_center_x - 0.5) * 1.5 + 0.5
+        # Where is the face in exact pixels on the original video?
+        face_pixel_x = face_center_x * src_width
+        
+        # To center the face, the left edge of the crop must be half a crop-width to the left
+        target_x_offset_px = face_pixel_x - (crop_width / 2)
+        
+        # Maximum possible sliding distance for the crop window
+        max_x_offset = src_width - crop_width
+        
+        if max_x_offset <= 0:
+            return 0.5 # Safety fallback
+            
+        # Convert the pixel offset back into a 0.0 to 1.0 ratio for the smoothing algorithm
+        crop_pos = target_x_offset_px / max_x_offset
+        
+        # Clamp to edges so we don't crop outside the video bounds
         return max(0.0, min(1.0, crop_pos))
 
     def _smooth_positions(self, positions: list[float]) -> list[float]:
