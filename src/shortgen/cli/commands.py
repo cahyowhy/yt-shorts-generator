@@ -1,18 +1,11 @@
 """CLI commands using Typer."""
 
 import asyncio
+import json
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
 from rich.table import Table
 
 from shortgen.config import settings
@@ -34,7 +27,18 @@ def generate(
     platform: Platform = typer.Option(Platform.YOUTUBE_SHORTS, "--platform", "-p"),
     count: int = typer.Option(5, "--count", "-c", help="Number of shorts to generate"),
     all_segments: bool = typer.Option(False, "--all-segments", help="Render all segments found by the LLM"),
+    video_cuts: str = typer.Option(None, "--video-cuts", help='JSON string of start/end times in seconds to bypass LLM, e.g., "[[0,30],[32,67]]"'),
 ):
+    parsed_cuts = None
+    if video_cuts:
+        try:
+            parsed_cuts = json.loads(video_cuts)
+            if not isinstance(parsed_cuts, list) or not all(isinstance(i, list) and len(i) == 2 for i in parsed_cuts):
+                raise ValueError
+        except ValueError:
+            console.print("[red]Error:[/red] Invalid format for --video-cuts. Must be a JSON array of 2-element arrays, e.g., '[[0,30],[32,67]]'")
+            raise typer.Exit(1)
+
     pipeline = ShortGeneratorPipeline()
     import asyncio
     asyncio.run(pipeline.process(
@@ -43,6 +47,7 @@ def generate(
         num_shorts=count,
         output_dir=output,
         all_segments=all_segments,
+        video_cuts=parsed_cuts,
     ))
 
 @app.command()

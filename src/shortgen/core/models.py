@@ -41,6 +41,7 @@ class VideoMetadata(BaseModel):
     height: int
     fps: float
     file_path: str
+    original_lang: str
     subtitle_path: Optional[str] = None  # Add this field
 
     @computed_field
@@ -76,6 +77,8 @@ class Segment(BaseModel):
     transcript: str = ""
     transcript_words: list[TranscriptWord] = Field(default_factory=list)
     highlight_score: float = 0.0  # LLM-assigned score
+    hook: Optional[str]
+    hook_audio_path: Optional[str]
 
     # Composite score (computed by scorer)
     final_score: float = 0.0

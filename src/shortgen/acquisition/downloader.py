@@ -162,6 +162,7 @@ class VideoDownloader:
                 height=info.get("height", 1080),
                 fps=float(info.get("fps", 30)),
                 file_path=str(file_path),
+                original_lang=original_lang,
                 subtitle_path=str(subtitle_path) if subtitle_path else None,
             )
 

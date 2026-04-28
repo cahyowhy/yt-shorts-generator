@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     ollama_model: str = Field(default="mistral")
     
     gemini_api_key: str = Field(default="")
-    gemini_model: str = Field(default="gemini-3.1-pro-preview")
+    gemini_model: str = Field(default="gemini-3-flash-preview")
 
     # Processing settings
     min_segment_duration: float = Field(default=45.0)

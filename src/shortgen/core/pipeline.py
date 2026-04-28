@@ -69,11 +69,6 @@ class ShortGeneratorPipeline:
         res = await Transcriber().transcribe("data/downloads/VJINzo0R2Cw.mp4")    
         logger.info(res["text"])
     
-    async def test(self, input_file):
-        with open(input_file, 'r', encoding='utf-8') as file:
-            content = file.read()
-            await self.highlight_finder.find_highlights(content, 6000, 10)
-    
     def convert_srt_to_seconds(self, input_file, output_file):
         with open(input_file, 'r', encoding='utf-8') as file:
             content = file.read()
@@ -108,6 +103,7 @@ class ShortGeneratorPipeline:
         num_shorts: int = 5,
         output_dir: Optional[Path] = None,
         all_segments: bool = False,
+        video_cuts: Optional[list[list[int]]] = None,
     ) -> list[Path]:
         """
         Main processing pipeline.
@@ -116,8 +112,12 @@ class ShortGeneratorPipeline:
         output_dir.mkdir(parents=True, exist_ok=True)
         
         use_sliding_window = not all_segments
+        skip_llm = bool(video_cuts)
         
-        logger.info("use_sliding_window" if use_sliding_window else "all_segments")
+        if video_cuts:
+            logger.info("Using explicit video cuts (LLM skipped)")
+        else:
+            logger.info("use_sliding_window" if use_sliding_window else "all_segments")
 
         try:
             # Stage 1: Download
@@ -127,23 +127,31 @@ class ShortGeneratorPipeline:
 
             # Stage 2: Parallel Analysis
             self._update_progress("analyzing", 0.0)
-            analysis_results = await self._run_analysis(metadata)
+            analysis_results = await self._run_analysis(metadata, skip_llm=skip_llm)
             self._update_progress("analyzing", 1.0)
 
             # Stage 3: Segment Generation
             self._update_progress("scoring", 0.0)
             
-            if use_sliding_window:
-                # Use sliding window logic from pipeline_old.py
-                candidate_segments = self._generate_sliding_window_segments(metadata, analysis_results)
+            scored_segments = []
+            if video_cuts:
+                for cut in video_cuts:
+                    if len(cut) >= 2:
+                        start, end = float(cut[0]), float(cut[1])
+                        # Directly create the segment without relying on highlights
+                        scored_segments.append(self._create_segment_object(start, end, 1.0, analysis_results))
             else:
-                # Use LLM highlight logic from pipeline.py
-                candidate_segments = self._generate_llm_segments(metadata, analysis_results)
+                if use_sliding_window:
+                    # Use sliding window logic from pipeline_old.py
+                    candidate_segments = self._generate_sliding_window_segments(metadata, analysis_results)
+                else:
+                    # Use LLM highlight logic from pipeline.py
+                    candidate_segments = self._generate_llm_segments(analysis_results)
 
-            # Score and rank segments
-            scored_segments = self.scorer.score_segments(candidate_segments)
-            if use_sliding_window:
-                scored_segments = self._select_best_segments(scored_segments, num_shorts)
+                # Score and rank segments
+                scored_segments = self.scorer.score_segments(candidate_segments)
+                if use_sliding_window:
+                    scored_segments = self._select_best_segments(scored_segments, num_shorts)
             
             self._update_progress("scoring", 1.0)
             logger.info(f"Selected {len(scored_segments)} segments")
@@ -169,7 +177,7 @@ class ShortGeneratorPipeline:
             logger.error(f"Pipeline failed: {e}")
             raise
 
-    async def _run_analysis(self, metadata: VideoMetadata) -> dict:
+    async def _run_analysis(self, metadata: VideoMetadata, skip_llm: bool = False) -> dict:
         """Run all analysis tasks in parallel."""
         video_path = metadata.file_path
 
@@ -181,7 +189,15 @@ class ShortGeneratorPipeline:
         ]
         
         transcript, audio_energy, scenes, face_positions = await asyncio.gather(*tasks)
-        highlights = await self.highlight_finder.find_highlights(metadata.subtitle_path, metadata.duration)
+        
+        if skip_llm:
+            highlights = []
+        else:
+            highlights = await self.highlight_finder.find_highlights(
+                subtitle_path= metadata.subtitle_path, 
+                video_duration= metadata.duration,
+                subtitle_lang=metadata.original_lang
+            )
 
         return {
             "transcript": transcript,
@@ -191,15 +207,28 @@ class ShortGeneratorPipeline:
             "highlights": highlights,
         }
 
-    def _generate_llm_segments(self, metadata: VideoMetadata, analysis: dict) -> list[Segment]:
+    def _generate_llm_segments(self, analysis: dict) -> list[Segment]:
         """Generate segments based on LLM detected highlights."""
-        highlights = analysis.get("highlights", [])
+        highlights = analysis.get("highlights") or []
         segments = []
+        
         for h in highlights:
-            start, end = float(h.get("start", 0.0)), float(h.get("end", 0.0))
-            if end <= start: continue
+            start = float(h.get("start") or 0.0)
+            end = float(h.get("end") or 0.0)
+            
+            if end <= start:
+                continue
 
-            segments.append(self._create_segment_object(start, end, float(h.get("score", 0.0)), analysis))
+            score = float(h.get("score") or 0.0)
+            hook = h.get("hook")
+            hook_audio = h.get("hook_audio_path")
+            
+            # Pass directly into the factory method
+            segment = self._create_segment_object(
+                start, end, score, analysis, hook=hook, hook_audio_path=hook_audio
+            )
+            segments.append(segment)
+            
         return segments
 
     def _generate_sliding_window_segments(self, metadata: VideoMetadata, analysis: dict) -> list[Segment]:
@@ -240,13 +269,23 @@ class ShortGeneratorPipeline:
                 highlight_score=self._get_highlight_score_for_range(
                     analysis["highlights"], current_time, end_time
                 ),
+                hook=None,              # Fallback None so Pydantic doesn't throw ValidationError
+                hook_audio_path=None    # Fallback None so Pydantic doesn't throw ValidationError
             )
             segments.append(segment)
             current_time += step_size
 
         return segments
 
-    def _create_segment_object(self, start: float, end: float, h_score: float, analysis: dict) -> Segment:
+    def _create_segment_object(
+        self, 
+        start: float, 
+        end: float, 
+        h_score: float, 
+        analysis: dict,
+        hook: Optional[str] = None,
+        hook_audio_path: Optional[str] = None
+    ) -> Segment:
         """Helper to build Segment model with common analysis data."""
         return Segment(
             start_time=start,
@@ -257,6 +296,8 @@ class ShortGeneratorPipeline:
             transcript=self._get_transcript_for_range(analysis["transcript"], start, end),
             transcript_words=self._get_transcript_words_for_range(analysis["transcript"], start, end),
             highlight_score=h_score,
+            hook=hook,
+            hook_audio_path=hook_audio_path
         )
 
     def _select_best_segments(self, segments: list[Segment], limit: Optional[int]) -> list[Segment]:
@@ -288,7 +329,16 @@ class ShortGeneratorPipeline:
         output_filename = f"short_{metadata.video_id}_{index:02d}_{int(segment.start_time)}s.mp4"
         output_path = output_dir / output_filename
 
-        await self.renderer.render(clip_path, output_path, crop_windows, captions, platform)
+        # PERBAIKAN: Gunakan keyword arguments secara eksplisit agar urutan tidak masalah
+        await self.renderer.render(
+            input_path=clip_path, 
+            output_path=output_path, 
+            crop_windows=crop_windows, 
+            captions=captions, 
+            hook=segment.hook,
+            hook_speaker_path=segment.hook_audio_path,
+            platform=platform
+        )
         return output_path
 
     # ==================== Helper Methods (Shared Logic) ====================

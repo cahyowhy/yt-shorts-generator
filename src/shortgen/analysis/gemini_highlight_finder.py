@@ -3,6 +3,9 @@
 import asyncio
 import json
 import os
+import base64
+import uuid
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -17,12 +20,10 @@ class GeminiHighlightFinder:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
         timeout: float = 120.0,
     ):
-        self.api_key = api_key or getattr(settings, "gemini_api_key", os.environ.get("GEMINI_API_KEY"))
-        self.model_name = model or getattr(settings, "gemini_model", "gemini-1.5-flash")
+        self.api_key = settings.gemini_api_key
+        self.model_name = settings.gemini_model
         self.timeout = timeout
         
         if not self.api_key:
@@ -32,7 +33,8 @@ class GeminiHighlightFinder:
         self,
         subtitle_path: str,
         video_duration: float,
-        num_highlights: int = 5,
+        subtitle_lang: str = 'en',
+        num_highlights: int = 2,
     ) -> list[dict]:
         if not subtitle_path.strip():
             logger.warning("Empty transcript, skipping highlight detection")
@@ -48,7 +50,10 @@ class GeminiHighlightFinder:
                 logger.warning("Gemini API key not configured, using fallback scoring")
                 return self._fallback_highlights(content, video_duration)
 
-            prompt = self._build_prompt(video_duration, num_highlights)
+            prompt = self._build_prompt(video_duration, num_highlights, subtitle_lang)
+            logger.info("======================================================================")
+            logger.info(prompt)
+            logger.info("======================================================================")
             
             # Use a shared client for connection pooling across the upload, query, and delete steps
             async with httpx.AsyncClient() as client:
@@ -70,15 +75,104 @@ class GeminiHighlightFinder:
                     if file_name:
                         await self._delete_file(client, file_name)
 
-            highlights = self._parse_response(response_text, video_duration)
+                highlights = self._parse_response(response_text, video_duration)
+                
+                # 4. Generate TTS for each highlight hook
+                temp_dir = Path("data/temp")
+                temp_dir.mkdir(parents=True, exist_ok=True)
+
+                for i, highlight in enumerate(highlights):
+                    hook_text = highlight.get("hook")
+                    if hook_text:
+                        wav_filename = f"hook_{uuid.uuid4().hex[:8]}.wav"
+                        wav_path = temp_dir / wav_filename
+                        
+                        logger.info(f"Generating TTS for highlight {i+1}/{len(highlights)}: '{hook_text}'")
+                        try:
+                            await self._generate_tts(client, hook_text, wav_path)
+                            highlight["hook_audio_path"] = str(wav_path)
+                        except Exception as e:
+                            logger.error(f"Failed to generate TTS for hook '{hook_text}': {e}")
+                            highlight["hook_audio_path"] = None
 
             logger.info(f"Found {len(highlights)} highlights")
-            logger.info(f"Highlight: {json.dumps(highlights)}")
+            logger.info(f"Highlight: {json.dumps(highlights, indent=2)}")
             return highlights
 
         except Exception as e:
             logger.error(f"Highlight detection failed: {e}")
             return self._fallback_highlights(subtitle_path, video_duration)
+
+    async def _generate_tts(self, client: httpx.AsyncClient, text: str, output_wav_path: Path) -> None:
+        """Generate audio using Gemini TTS API and convert it to WAV via FFmpeg."""
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent?key={self.api_key}"
+        
+        payload = {
+            "contents": [{
+                "parts": [{"text": text}]
+            }],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {
+                    "voiceConfig": {
+                        "prebuiltVoiceConfig": {
+                            "voiceName": "Charon"
+                        }
+                    }
+                }
+            }
+        }
+        
+        response = await client.post(
+            url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=self.timeout
+        )
+
+        if response.status_code != 200:
+            raise AnalysisError(f"TTS API failed ({response.status_code}): {response.text}")
+
+        result = response.json()
+        
+        try:
+            base64_audio = result["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+        except (KeyError, IndexError) as e:
+            raise AnalysisError(f"Failed to parse TTS response structure: {e}\nRaw: {result}")
+
+        # Decode base64 to PCM
+        pcm_data = base64.b64decode(base64_audio)
+        temp_pcm_path = output_wav_path.with_suffix(".pcm")
+        
+        with open(temp_pcm_path, "wb") as f:
+            f.write(pcm_data)
+            
+        # Convert PCM to WAV using FFmpeg
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "s16le",
+            "-ar", "24000",
+            "-ac", "1",
+            "-i", str(temp_pcm_path),
+            str(output_wav_path)
+        ]
+        
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await process.communicate()
+            if process.returncode != 0:
+                error_msg = stderr.decode() if stderr else "Unknown error"
+                raise AnalysisError(f"FFmpeg failed converting TTS PCM to WAV: {error_msg}")
+        finally:
+            if temp_pcm_path.exists():
+                try:
+                    temp_pcm_path.unlink()
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temp PCM file {temp_pcm_path}: {e}")
 
     async def _upload_transcript(self, client: httpx.AsyncClient, transcript: str) -> dict:
         """Uploads the transcript to the Gemini File API."""
@@ -116,11 +210,22 @@ class GeminiHighlightFinder:
         self,
         video_duration: float,
         num_highlights: int,
+        subtitle_lang: str
     ) -> str:
         """Build prompt for highlight detection."""
+        actual_lang = ""
+        if subtitle_lang.lower().startswith("id"):
+            actual_lang = "Indonesian"
+        elif subtitle_lang.lower().startswith("ko"):
+            actual_lang = "Korean"
+        else: 
+            actual_lang = "English"
 
         return f"""Analyze the attached video transcript file (.srt) and identify the {num_highlights} most engaging moments that would make great short-form video clips (45-120 seconds each).
             VIDEO DURATION: {video_duration:.0f} seconds
+
+            CRITICAL LANGUAGE REQUIREMENT:
+            The generated "hook" text ABSOLUTELY MUST be written in {actual_lang.upper()}. Do NOT translate the hook into English unless {actual_lang} is English.
 
             CRITICAL INSTRUCTION TO PREVENT TIMESTAMPS HALLUCINATION:
             Do not guess, estimate, or calculate the timestamps. You must GROUND your extraction.
@@ -145,7 +250,8 @@ class GeminiHighlightFinder:
                         "exact_end_quote": "yang menyenangi kecelakaan sejarah yang",
                         "end_time": "00:04:39,020",
                         "score": 0.9,
-                        "reason": "Humorous and relatable opening about philosophy students becoming journalists."
+                        "reason": "Humorous and relatable opening about philosophy students becoming journalists.",
+                        "hook": "[MUST BE IN {actual_lang.upper()}] Catchy hook words for short video 6-10 words"
                     }}
                 ]
             }}"""
@@ -185,9 +291,10 @@ class GeminiHighlightFinder:
                                     "exact_end_quote": {"type": "STRING"},
                                     "end_time": {"type": "STRING"},
                                     "score": {"type": "NUMBER"},
-                                    "reason": {"type": "STRING"}
+                                    "reason": {"type": "STRING"},
+                                    "hook": {"type": "STRING"}
                                 },
-                                "required": ["exact_start_quote", "start_time", "exact_end_quote", "end_time", "score", "reason"]
+                                "required": ["exact_start_quote", "start_time", "exact_end_quote", "end_time", "score", "reason", "hook"]
                             }
                         }
                     },
@@ -289,6 +396,7 @@ class GeminiHighlightFinder:
                         "end": end,
                         "score": score,
                         "reason": h.get("reason", ""),
+                        "hook": h.get("hook", ""),  # Memasukkan data 'hook' agar bisa dipakai TTS
                     })
 
             return highlights
@@ -341,6 +449,7 @@ class GeminiHighlightFinder:
                     "end": end_time,
                     "score": score,
                     "reason": "Contains engaging keywords",
+                    "hook": "" # Fallback kosong
                 })
 
         highlights.sort(key=lambda x: x["score"], reverse=True)
