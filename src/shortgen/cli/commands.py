@@ -26,7 +26,7 @@ def generate(
     output: Path = typer.Option(None, "--output", "-o", help="Output directory"),
     platform: Platform = typer.Option(Platform.YOUTUBE_SHORTS, "--platform", "-p"),
     count: int = typer.Option(5, "--count", "-c", help="Number of shorts to generate"),
-    all_segments: bool = typer.Option(False, "--all-segments", help="Render all segments found by the LLM"),
+    watermark_title: str = typer.Option(None, "--wm", help='embed watermark"'),
     video_cuts: str = typer.Option(None, "--video-cuts", help='JSON string of start/end times in seconds to bypass LLM, e.g., "[[0,30],[32,67]]"'),
 ):
     parsed_cuts = None
@@ -46,7 +46,7 @@ def generate(
         platform=platform,
         num_shorts=count,
         output_dir=output,
-        all_segments=all_segments,
+        watermark_title=watermark_title,
         video_cuts=parsed_cuts,
     ))
 

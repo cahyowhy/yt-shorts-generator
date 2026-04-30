@@ -14,22 +14,6 @@ class Platform(str, Enum):
     INSTAGRAM_REELS = "instagram_reels"
     TIKTOK = "tiktok"
 
-    @property
-    def max_duration(self) -> int:
-        """Maximum duration in seconds for each platform."""
-        durations = {
-            Platform.YOUTUBE_SHORTS: 60,
-            Platform.INSTAGRAM_REELS: 90,
-            Platform.TIKTOK: 180,
-        }
-        return durations[self]
-
-    @property
-    def aspect_ratio(self) -> tuple[int, int]:
-        """Aspect ratio (width, height) for each platform."""
-        return (9, 16)  # All platforms use 9:16
-
-
 class VideoMetadata(BaseModel):
     """Source video information."""
 

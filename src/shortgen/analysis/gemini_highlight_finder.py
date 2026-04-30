@@ -34,7 +34,8 @@ class GeminiHighlightFinder:
         subtitle_path: str,
         video_duration: float,
         subtitle_lang: str = 'en',
-        num_highlights: int = 2,
+        num_highlights: int = 5,
+        skip_time_from_0_until: str = None
     ) -> list[dict]:
         if not subtitle_path.strip():
             logger.warning("Empty transcript, skipping highlight detection")
@@ -50,7 +51,12 @@ class GeminiHighlightFinder:
                 logger.warning("Gemini API key not configured, using fallback scoring")
                 return self._fallback_highlights(content, video_duration)
 
-            prompt = self._build_prompt(video_duration, num_highlights, subtitle_lang)
+            prompt = self._build_prompt(
+                video_duration=video_duration, 
+                num_highlights=num_highlights, 
+                subtitle_lang=subtitle_lang,
+                skip_time_from_0_until=skip_time_from_0_until
+            )
             logger.info("======================================================================")
             logger.info(prompt)
             logger.info("======================================================================")
@@ -210,7 +216,8 @@ class GeminiHighlightFinder:
         self,
         video_duration: float,
         num_highlights: int,
-        subtitle_lang: str
+        subtitle_lang: str,
+        skip_time_from_0_until: str = None
     ) -> str:
         """Build prompt for highlight detection."""
         actual_lang = ""
@@ -221,9 +228,16 @@ class GeminiHighlightFinder:
         else: 
             actual_lang = "English"
 
+        skip_instruction = ""
+        if skip_time_from_0_until:
+            skip_instruction = f"""
+            CRITICAL EXCLUSION REQUIREMENT:
+            Completely ignore and SKIP the beginning of the video from 00:00:00 up to {skip_time_from_0_until}. Do NOT extract any highlights or quotes from this skipped timeframe.
+            """
+
         return f"""Analyze the attached video transcript file (.srt) and identify the {num_highlights} most engaging moments that would make great short-form video clips (45-120 seconds each).
             VIDEO DURATION: {video_duration:.0f} seconds
-
+            {skip_instruction}
             CRITICAL LANGUAGE REQUIREMENT:
             The generated "hook" text ABSOLUTELY MUST be written in {actual_lang.upper()}. Do NOT translate the hook into English unless {actual_lang} is English.
 

@@ -45,12 +45,14 @@ class VideoRenderer:
         hook: Optional[str],
         hook_speaker_path: Optional[Path],
         platform: Platform = Platform.YOUTUBE_SHORTS,
+        watermark_title: Optional[str] = None,
     ) -> Path:
         logger.info(f"Preparing render for: {str(output_path)}")
 
         caption_file: Optional[str] = None
         temp_video_file: Optional[str] = None
         temp_merged_video_file: Optional[str] = None
+        temp_hooked_video_file: Optional[str] = None
 
         if captions:
             caption_file = await self._write_caption_file(captions)
@@ -80,17 +82,31 @@ class VideoRenderer:
                 total_duration=crop_windows[-1].timestamp if crop_windows else 0.0
             )
 
+            # Siapkan file temporary ketiga untuk menampung hasil hook sementara
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+                temp_hooked_video_file = f.name
+
             await self._appendHook(
                 temp_video_path=Path(temp_merged_video_file),
-                output_path=output_path,
+                output_path=Path(temp_hooked_video_file),
                 hook=hook,
                 hook_speaker_path=hook_speaker_path
             )
+            
+            if watermark_title:
+                await self._add_watermark(
+                    input_path=Path(temp_hooked_video_file),
+                    output_path=output_path,
+                    watermark_title=watermark_title
+                )
+            else:
+                await asyncio.to_thread(shutil.move, str(temp_hooked_video_file), str(output_path))
 
             return output_path
 
         finally:
-            for p in [caption_file, temp_video_file, temp_merged_video_file]:
+            # Pastikan temporary file ketiga juga dihapus
+            for p in [caption_file, temp_video_file, temp_merged_video_file, temp_hooked_video_file]:
                 if p and Path(p).exists():
                     try:
                         Path(p).unlink()
@@ -479,6 +495,51 @@ class VideoRenderer:
                         tmp.unlink()
                     except Exception as e:
                         logger.warning(f"Failed to delete temp file {tmp}: {e}")
+
+    def _find_watermark_font(self) -> str | None:
+        """Find a suitable sans-serif font for the watermark based on the OS."""
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/Library/Fonts/Arial Bold.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                # FFmpeg requires paths to use forward slashes even on Windows
+                return p.replace("\\", "/")
+        return None
+
+    async def _add_watermark(
+        self, input_path: Path, 
+        output_path: Path,
+        watermark_title: str
+    ) -> None:
+        """Add a watermark to the video at the bottom right corner."""
+        logger.info(f"Adding watermark to {output_path.name}")
+        font_path = self._find_watermark_font()
+        
+        # Format the filter string based on whether we dynamically found a font path
+        if font_path:
+            vf = f"drawtext=text='{watermark_title}':x=w-tw-20:y=h-th-20:fontfile='{font_path}':fontsize=32:fontcolor=white@0.6:shadowcolor=black:shadowx=2:shadowy=2"
+        else:
+            # Fallback to the exact string requested by user if we can't find a generic one
+            vf = f"drawtext=text='{watermark_title}:x=w-tw-20:y=h-th-20:fontfile=/Windows/Fonts/arial.ttf:fontsize=32:fontcolor=white@0.6:shadowcolor=black:shadowx=2:shadowy=2"
+
+        # Apply the video filter. Audio is copied, but video MUST be re-encoded to apply filters.
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(input_path),
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-c:a", "copy",
+            str(output_path)
+        ]
+        
+        await self._run_ffmpeg(cmd, "FFmpeg failed adding watermark")
 
     async def _merge_with_ffmpeg(
         self,

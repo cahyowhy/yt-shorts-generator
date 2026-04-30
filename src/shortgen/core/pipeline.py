@@ -102,7 +102,7 @@ class ShortGeneratorPipeline:
         platform: Platform = Platform.YOUTUBE_SHORTS,
         num_shorts: int = 5,
         output_dir: Optional[Path] = None,
-        all_segments: bool = False,
+        watermark_title: Optional[str] = None,
         video_cuts: Optional[list[list[int]]] = None,
     ) -> list[Path]:
         """
@@ -110,14 +110,9 @@ class ShortGeneratorPipeline:
         """
         output_dir = output_dir or settings.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
-        
-        use_sliding_window = not all_segments
         skip_llm = bool(video_cuts)
         
-        if video_cuts:
-            logger.info("Using explicit video cuts (LLM skipped)")
-        else:
-            logger.info("use_sliding_window" if use_sliding_window else "all_segments")
+        logger.info(f"Generate total {num_shorts} shorts")
 
         try:
             # Stage 1: Download
@@ -127,7 +122,7 @@ class ShortGeneratorPipeline:
 
             # Stage 2: Parallel Analysis
             self._update_progress("analyzing", 0.0)
-            analysis_results = await self._run_analysis(metadata, skip_llm=skip_llm)
+            analysis_results = await self._run_analysis(metadata, skip_llm=skip_llm, num_shorts=num_shorts)
             self._update_progress("analyzing", 1.0)
 
             # Stage 3: Segment Generation
@@ -141,18 +136,9 @@ class ShortGeneratorPipeline:
                         # Directly create the segment without relying on highlights
                         scored_segments.append(self._create_segment_object(start, end, 1.0, analysis_results))
             else:
-                if use_sliding_window:
-                    # Use sliding window logic from pipeline_old.py
-                    candidate_segments = self._generate_sliding_window_segments(metadata, analysis_results)
-                else:
-                    # Use LLM highlight logic from pipeline.py
-                    candidate_segments = self._generate_llm_segments(analysis_results)
-
+                candidate_segments = self._generate_llm_segments(analysis_results)
                 # Score and rank segments
-                scored_segments = self.scorer.score_segments(candidate_segments)
-                if use_sliding_window:
-                    scored_segments = self._select_best_segments(scored_segments, num_shorts)
-            
+                scored_segments = self.scorer.score_segments(candidate_segments)         
             self._update_progress("scoring", 1.0)
             logger.info(f"Selected {len(scored_segments)} segments")
 
@@ -167,6 +153,7 @@ class ShortGeneratorPipeline:
                     platform=platform,
                     output_dir=output_dir,
                     index=i,
+                    watermark_title=watermark_title
                 )
                 output_paths.append(output_path)
 
@@ -177,7 +164,7 @@ class ShortGeneratorPipeline:
             logger.error(f"Pipeline failed: {e}")
             raise
 
-    async def _run_analysis(self, metadata: VideoMetadata, skip_llm: bool = False) -> dict:
+    async def _run_analysis(self, metadata: VideoMetadata, skip_llm: bool = False, num_shorts: int = 5,) -> dict:
         """Run all analysis tasks in parallel."""
         video_path = metadata.file_path
 
@@ -196,7 +183,8 @@ class ShortGeneratorPipeline:
             highlights = await self.highlight_finder.find_highlights(
                 subtitle_path= metadata.subtitle_path, 
                 video_duration= metadata.duration,
-                subtitle_lang=metadata.original_lang
+                subtitle_lang=metadata.original_lang,
+                num_highlights=num_shorts,
             )
 
         return {
@@ -300,23 +288,8 @@ class ShortGeneratorPipeline:
             hook_audio_path=hook_audio_path
         )
 
-    def _select_best_segments(self, segments: list[Segment], limit: Optional[int]) -> list[Segment]:
-        """Select top segments while removing overlapping ones."""
-        sorted_segments = sorted(segments, key=lambda s: s.final_score, reverse=True)
-        selected: list[Segment] = []
-        
-        for segment in sorted_segments:
-            if limit and len(selected) >= limit:
-                break
-
-            # Prevent rendering overlapping content
-            if not any(segment.overlaps_with(s, threshold=0.3) for s in selected):
-                selected.append(segment)
-
-        return selected
-
     async def _process_segment(self, metadata: VideoMetadata, segment: Segment, analysis_results: dict, 
-                               platform: Platform, output_dir: Path, index: int) -> Path:
+                               platform: Platform, output_dir: Path, index: int, watermark_title: Optional[str] = None) -> Path:
         """Extracts, crops, and renders a single segment."""
         clip_path = await self.clipper.extract(metadata.file_path, segment.start_time, segment.end_time)
         
@@ -337,6 +310,7 @@ class ShortGeneratorPipeline:
             captions=captions, 
             hook=segment.hook,
             hook_speaker_path=segment.hook_audio_path,
+            watermark_title=watermark_title,
             platform=platform
         )
         return output_path

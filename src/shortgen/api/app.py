@@ -3,13 +3,15 @@
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from typing import Optional, List
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-
+from pydantic import BaseModel, Field, field_validator
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from shortgen.config import settings
 from shortgen.core.models import JobStatus, Platform, ProcessingJob, ScoringWeights
 from shortgen.core.pipeline import ShortGeneratorPipeline
@@ -51,8 +53,21 @@ class JobCreateRequest(BaseModel):
 
     url: str = Field(..., description="YouTube video URL")
     platform: Platform = Field(default=Platform.YOUTUBE_SHORTS)
-    num_shorts: int = Field(default=5, ge=1, le=20)
+    num_shorts: int = Field(default=5, ge=1, le=20, description="Number of shorts to generate (maps to --count)")
     weights: Optional[ScoringWeights] = None
+    output_dir: Optional[str] = Field(default=None, description="Output directory path (maps to --output)")
+    watermark_title: Optional[str] = Field(default=None, description="Embed watermark (maps to --wm)")
+    video_cuts: Optional[List[List[float]]] = Field(
+        default=None, 
+        description="List of start/end times in seconds to bypass LLM, e.g., [[0,30],[32,67]]"
+    )
+
+    @field_validator('video_cuts')
+    def validate_video_cuts(cls, v):
+        if v is not None:
+            if not all(len(i) == 2 for i in v):
+                raise ValueError("Format tidak valid untuk video_cuts. Harus berupa array dari array 2-elemen, e.g., [[0,30],[32,67]]")
+        return v
 
 
 class JobResponse(BaseModel):
@@ -75,6 +90,46 @@ class HealthResponse(BaseModel):
     version: str
 
 
+class VideoInfoResponse(BaseModel):
+    """Video info response."""
+    
+    title: str
+    duration: float
+    resolution: str
+    fps: str
+    channel: str
+    views: int
+
+
+# Mount static files for output access (optional)
+import os
+
+output_folder = Path(settings.output_dir).resolve()
+app.mount("/output", StaticFiles(directory=str(output_folder)), name="output")
+
+@app.get("/output-files")
+async def list_output_files():
+    output_folder = Path.cwd() / "output"
+    
+    if not output_folder.exists():
+        return {"error": "Folder tidak ditemukan"}
+        
+    files_list = []
+    for file_path in output_folder.rglob("*"):
+        if file_path.is_file():
+            rel_path = file_path.relative_to(output_folder)
+            files_list.append({
+                "file_name": file_path.name,
+                "url": f"/output/{rel_path}",
+                "mtime": file_path.stat().st_mtime  # <-- Tambahkan baris ini
+            })
+            
+    return {
+        "files": files_list
+    }
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 # Routes
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -82,12 +137,33 @@ async def health_check():
     return HealthResponse(status="healthy", version="0.1.0")
 
 
+@app.get("/info", response_model=VideoInfoResponse)
+async def get_video_info(url: str = Query(..., description="YouTube video URL")):
+    """Get video information without processing (equivalent to 'shortgen info')."""
+    from shortgen.acquisition.downloader import VideoDownloader
+    
+    downloader = VideoDownloader()
+    
+    try:
+        info = await downloader.get_info(url)
+        return VideoInfoResponse(
+            title=info.get("title", "Unknown"),
+            duration=info.get("duration", 0),
+            resolution=f"{info.get('width', '?')}x{info.get('height', '?')}",
+            fps=str(info.get("fps", "?")),
+            channel=info.get("uploader", "Unknown"),
+            views=info.get("view_count", 0)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/jobs", response_model=JobResponse)
 async def create_job(
     request: JobCreateRequest,
     background_tasks: BackgroundTasks,
 ):
-    """Submit a new video processing job."""
+    """Submit a new video processing job (equivalent to 'shortgen generate')."""
     job_id = str(uuid.uuid4())
 
     job = ProcessingJob(
@@ -169,6 +245,18 @@ async def delete_job(job_id: str):
     return {"status": "deleted"}
 
 
+@app.post("/clean")
+async def clean_temp_files():
+    """Clean temporary files (equivalent to 'shortgen clean')."""
+    from shortgen.processing.clipper import VideoClipper
+    try:
+        clipper = VideoClipper()
+        count = clipper.cleanup_temp_files()
+        return {"status": "success", "cleaned_files": count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # Background task
 async def process_job_background(
     job_id: str,
@@ -200,10 +288,15 @@ async def process_job_background(
             progress_callback=update_progress,
         )
 
+        output_path_obj = Path(request.output_dir) if request.output_dir else None
+
         output_paths = await pipeline.process(
             url=request.url,
             platform=request.platform,
             num_shorts=request.num_shorts,
+            output_dir=output_path_obj,
+            watermark_title=request.watermark_title,
+            video_cuts=request.video_cuts,
         )
 
         job.status = JobStatus.COMPLETE
@@ -214,6 +307,8 @@ async def process_job_background(
         job.status = JobStatus.FAILED
         job.error = str(e)
 
-
-# Mount static files for output access (optional)
-# app.mount("/outputs", StaticFiles(directory=settings.output_dir), name="outputs")
+# Endpoint untuk membuka file HTML utama
+@app.get("/", include_in_schema=False)
+async def serve_frontend():
+    """Serve the Vue.js frontend."""
+    return FileResponse("static/index.html")
