@@ -104,6 +104,8 @@ class ShortGeneratorPipeline:
         output_dir: Optional[Path] = None,
         watermark_title: Optional[str] = None,
         video_cuts: Optional[list[list[int]]] = None,
+        overide_lang: Optional[str] = None,
+        tell_llm_skip_analyze_from_0_until: Optional[str] = None,
     ) -> list[Path]:
         """
         Main processing pipeline.
@@ -112,17 +114,34 @@ class ShortGeneratorPipeline:
         output_dir.mkdir(parents=True, exist_ok=True)
         skip_llm = bool(video_cuts)
         
+        logger.info(f"Platform {platform}")
         logger.info(f"Generate total {num_shorts} shorts")
+        if watermark_title:
+            logger.info(f"Watermark {watermark_title}")
+        
+        if video_cuts:
+            logger.info(f"Cut {video_cuts}")
+        
+        if overide_lang:
+            logger.info(f"Lang {overide_lang}")
+        
+        if tell_llm_skip_analyze_from_0_until:
+            logger.info(f"LLM skip analyze transcript from 00:00:00 until {tell_llm_skip_analyze_from_0_until}")
 
         try:
             # Stage 1: Download
             self._update_progress("downloading", 0.0)
-            metadata = await self.downloader.download(url)
+            metadata = await self.downloader.download(url, overide_lang)
             self._update_progress("downloading", 1.0)
 
             # Stage 2: Parallel Analysis
             self._update_progress("analyzing", 0.0)
-            analysis_results = await self._run_analysis(metadata, skip_llm=skip_llm, num_shorts=num_shorts)
+            analysis_results = await self._run_analysis(
+                metadata, 
+                skip_llm=skip_llm, 
+                num_shorts=num_shorts,
+                tell_llm_skip_analyze_from_0_until=tell_llm_skip_analyze_from_0_until
+            )
             self._update_progress("analyzing", 1.0)
 
             # Stage 3: Segment Generation
@@ -164,7 +183,13 @@ class ShortGeneratorPipeline:
             logger.error(f"Pipeline failed: {e}")
             raise
 
-    async def _run_analysis(self, metadata: VideoMetadata, skip_llm: bool = False, num_shorts: int = 5,) -> dict:
+    async def _run_analysis(
+        self, 
+        metadata: VideoMetadata, 
+        skip_llm: bool = False, 
+        num_shorts: int = 5,
+        tell_llm_skip_analyze_from_0_until: Optional[str] = None,
+    ) -> dict:
         """Run all analysis tasks in parallel."""
         video_path = metadata.file_path
 
@@ -185,6 +210,7 @@ class ShortGeneratorPipeline:
                 video_duration= metadata.duration,
                 subtitle_lang=metadata.original_lang,
                 num_highlights=num_shorts,
+                skip_time_from_0_until=tell_llm_skip_analyze_from_0_until
             )
 
         return {

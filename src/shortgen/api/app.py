@@ -56,7 +56,9 @@ class JobCreateRequest(BaseModel):
     num_shorts: int = Field(default=5, ge=1, le=20, description="Number of shorts to generate (maps to --count)")
     weights: Optional[ScoringWeights] = None
     output_dir: Optional[str] = Field(default=None, description="Output directory path (maps to --output)")
+    overide_lang: Optional[str] = Field(default=None, description="Force using selected lang, if not found or empty will use original lang (maps to --lang)")
     watermark_title: Optional[str] = Field(default=None, description="Embed watermark (maps to --wm)")
+    tell_llm_skip_analyze_from_0_until: Optional[str] = Field(default=None, description="This inform llm to skip analyze transcript from 00:00:00 until ... (example 00:00:50) (maps to --llm-skip-analyze-ts-until)")
     video_cuts: Optional[List[List[float]]] = Field(
         default=None, 
         description="List of start/end times in seconds to bypass LLM, e.g., [[0,30],[32,67]]"
@@ -297,6 +299,8 @@ async def process_job_background(
             output_dir=output_path_obj,
             watermark_title=request.watermark_title,
             video_cuts=request.video_cuts,
+            overide_lang=request.overide_lang,
+            tell_llm_skip_analyze_from_0_until=request.tell_llm_skip_analyze_from_0_until
         )
 
         job.status = JobStatus.COMPLETE

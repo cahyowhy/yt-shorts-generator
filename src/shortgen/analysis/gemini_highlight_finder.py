@@ -35,7 +35,7 @@ class GeminiHighlightFinder:
         video_duration: float,
         subtitle_lang: str = 'en',
         num_highlights: int = 5,
-        skip_time_from_0_until: str = None
+        skip_time_from_0_until: Optional[str] = None
     ) -> list[dict]:
         if not subtitle_path.strip():
             logger.warning("Empty transcript, skipping highlight detection")

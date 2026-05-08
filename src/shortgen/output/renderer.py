@@ -115,6 +115,7 @@ class VideoRenderer:
 
     def _process_video_opencv(self, input_path: Path, output_path: Path, crop_windows: list[CropWindow]) -> None:
         """Reads video, applies crop frame-by-frame, and writes to a temporary file."""
+        import numpy as np # Ensure numpy is available for the black canvas
         cap = cv2.VideoCapture(str(input_path))
         fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -142,13 +143,47 @@ class VideoRenderer:
                 h = int(window.height)
 
                 img_h, img_w = frame.shape[:2]
+
+                # --- FIX: Anamorphic Video Stretch ---
+                if img_w > img_h:  # Only apply to landscape videos
+                    expected_w = int(img_h * (16 / 9))
+                    if abs(img_w - expected_w) > 10:
+                        frame = cv2.resize(frame, (expected_w, img_h), interpolation=cv2.INTER_LINEAR)
+                        old_max_x = img_w - w
+                        new_max_x = expected_w - w
+                        if old_max_x > 0:
+                            x = int((x / old_max_x) * new_max_x)
+                        img_w = expected_w
+                # -------------------------------------
+
+                # Boundary checks to prevent slicing out of bounds
                 x = max(0, min(x, img_w - w))
                 y = max(0, min(y, img_h - h))
 
+                # Crop the frame
                 cropped_frame = frame[y:y+h, x:x+w]
-                resized_frame = cv2.resize(cropped_frame, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+                crop_h, crop_w = cropped_frame.shape[:2]
 
-                out.write(resized_frame)
+                # --- FIX: Preserve Aspect Ratio with Black Padding ---
+                # 1. Calculate the scale required to fit the crop inside the target resolution
+                scale = min(out_w / crop_w, out_h / crop_h)
+                new_w = int(crop_w * scale)
+                new_h = int(crop_h * scale)
+
+                # 2. Resize the crop proportionally
+                scaled_frame = cv2.resize(cropped_frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+                # 3. Create a blank black canvas of the target resolution
+                canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+
+                # 4. Calculate center offsets
+                y_offset = (out_h - new_h) // 2
+                x_offset = (out_w - new_w) // 2
+
+                # 5. Paste the scaled image onto the center of the black canvas
+                canvas[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = scaled_frame
+
+                out.write(canvas)
                 frame_idx += 1
                 pbar.update(1)
 
@@ -458,6 +493,8 @@ class VideoRenderer:
                     "ffmpeg", "-y",
                     "-loop", "1", "-i", str(styled_frame_path),
                     "-i", str(hook_speaker_path),
+                    "-map", "0:v:0",  # Safely force the video to come from the hook image
+                    "-map", "1:a:0?", # Safely force the audio to come from the speaker file
                     "-c:v", "libx264", "-preset", "fast", "-crf", "20", 
                     "-c:a", "aac", "-b:a", "192k",
                     "-pix_fmt", "yuv420p", "-r", fps_str,

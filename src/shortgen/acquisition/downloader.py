@@ -79,7 +79,7 @@ class VideoDownloader:
             },
         }
 
-    async def download(self, url: str) -> VideoMetadata:
+    async def download(self, url: str, overide_lang: Optional[str] = None) -> VideoMetadata:
         """
         Download a video from YouTube.
 
@@ -99,11 +99,12 @@ class VideoDownloader:
             self._download_sync,
             url,
             video_id,
+            overide_lang
         )
 
         return metadata
 
-    def _download_sync(self, url: str, video_id: str) -> VideoMetadata:
+    def _download_sync(self, url: str, video_id: str, overide_lang: Optional[str]) -> VideoMetadata:
         """Synchronous download implementation."""
         try:
             # Step 1: Extract info to detect language
@@ -126,12 +127,30 @@ class VideoDownloader:
 
             logger.debug(f"Subtitles in info: {list(info.get('subtitles', {}).keys())}")
             logger.debug(f"Auto captions in info: {list(info.get('automatic_captions', {}).keys())}")
+            
+            avail_langs = list(info.get('subtitles', {}).keys()) + list(info.get('automatic_captions', {}).keys())
+            final_lang = ""
+            matched_lang = None
+            if overide_lang:
+                matched_lang = next((l for l in avail_langs if l.startswith(overide_lang)), None)
 
-            # Detect original video language
-            original_lang = self._detect_original_language(info)
-            logger.info(f"Detected original video language: {original_lang}")
+            if matched_lang:
+                final_lang = matched_lang
+            else:
+                final_lang = self._detect_original_language(info)    
 
-            # Step 2: Download video file
+            logger.info(f"Using video language: {final_lang}")
+            
+            # Step 2: Download subtitles (with delay to avoid rate limiting)
+            subtitle_path = None
+            try:
+                logger.info("Waiting before subtitle download (rate limit prevention)...")
+                time.sleep(5)  # Wait 5 seconds before downloading subtitles
+                subtitle_path = self._download_subtitles(url, video_id, final_lang)
+            except Exception as e:
+                logger.warning(f"Subtitle download failed (will use Whisper): {e}")
+
+            # Step 3: Download video file
             logger.info("Downloading video file...")
             ydl_opts = self._get_ydl_opts(video_id)
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -144,15 +163,6 @@ class VideoDownloader:
             if file_path is None:
                 raise DownloadError(f"Downloaded file not found for: {video_id}")
 
-            # Step 3: Download subtitles (with delay to avoid rate limiting)
-            subtitle_path = None
-            try:
-                logger.info("Waiting before subtitle download (rate limit prevention)...")
-                time.sleep(5)  # Wait 5 seconds before downloading subtitles
-                subtitle_path = self._download_subtitles(url, video_id, original_lang)
-            except Exception as e:
-                logger.warning(f"Subtitle download failed (will use Whisper): {e}")
-
             return VideoMetadata(
                 url=url,
                 video_id=video_id,
@@ -162,7 +172,7 @@ class VideoDownloader:
                 height=info.get("height", 1080),
                 fps=float(info.get("fps", 30)),
                 file_path=str(file_path),
-                original_lang=original_lang,
+                original_lang=final_lang,
                 subtitle_path=str(subtitle_path) if subtitle_path else None,
             )
 

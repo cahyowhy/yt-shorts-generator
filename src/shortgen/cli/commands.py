@@ -26,8 +26,10 @@ def generate(
     output: Path = typer.Option(None, "--output", "-o", help="Output directory"),
     platform: Platform = typer.Option(Platform.YOUTUBE_SHORTS, "--platform", "-p"),
     count: int = typer.Option(5, "--count", "-c", help="Number of shorts to generate"),
-    watermark_title: str = typer.Option(None, "--wm", help='embed watermark"'),
-    video_cuts: str = typer.Option(None, "--video-cuts", help='JSON string of start/end times in seconds to bypass LLM, e.g., "[[0,30],[32,67]]"'),
+    watermark_title: str = typer.Option(None, "--watermark", "-wm", help='embed watermark"'),
+    video_cuts: str = typer.Option(None, "--video-cuts", "-cut",help='JSON string of start/end times in seconds to bypass LLM, e.g., "[[0,30],[32,67]]"'),
+    overide_lang: str = typer.Option(None, "--lang", "-l", help='force using lang, if not found or empty will use original lang"'),
+    tell_llm_skip_analyze_from_0_until: str = typer.Option(None, "--llm-skip-analyze-ts-until", "-ls", help='This inform llm to skip analyze transcript from 00:00:00 until ... (example 00:00:50)'),
 ):
     parsed_cuts = None
     if video_cuts:
@@ -48,6 +50,8 @@ def generate(
         output_dir=output,
         watermark_title=watermark_title,
         video_cuts=parsed_cuts,
+        overide_lang=overide_lang,
+        tell_llm_skip_analyze_from_0_until=tell_llm_skip_analyze_from_0_until
     ))
 
 @app.command()
